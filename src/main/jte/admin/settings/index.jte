@@ -6,6 +6,7 @@
 @import ru.iopump.qa.allure.web.dto.SystemSettingsView
 @param SystemSettingsView settings
 @param AiSettingsView ai
+@param String aiBuiltInPrompt
 @param AiCheckView aiCheck = null
 @param CurrentUserView currentUser = null
 @param boolean authEnabled = true
@@ -63,8 +64,10 @@
                     <p class="mt-1 text-sm text-text-muted">
                         Runtime overrides of the <code class="font-mono text-primary">allure-ai.*</code> configuration. An
                         <strong>empty</strong> field (or <strong>Default</strong> in a list) means "keep the configured value", so the
-                        badge next to each field says where the value in force comes from. A running analysis keeps the settings it
-                        started with; the next job picks the new ones up without a restart.
+                        badge next to each field says where the value in force comes from. The two prompts at the bottom have no
+                        <code class="font-mono text-primary">allure-ai.*</code> counterpart: empty means the text built into the
+                        analysis core. A running analysis keeps the settings it started with; the next job picks the new ones up
+                        without a restart.
                     </p>
                 </header>
 
@@ -165,6 +168,39 @@
                                 <span class="ml-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${timeoutSeconds.fromSettings() ? "bg-primary/15 text-primary" : "bg-surface text-text-muted"}">${timeoutSeconds.source()}</span>
                             </p>
                         </div>
+                    </div>
+
+                    !{ var systemPrompt = ai.systemPrompt(); }
+                    <div class="space-y-1">
+                        <label for="ai-system-prompt" class="block text-sm font-medium text-text">System prompt</label>
+                        <textarea name="systemPrompt" id="ai-system-prompt" rows="12" class="form-field font-mono">${systemPrompt.override()}</textarea>
+                        <p class="text-xs text-text-muted">
+                            In force: <span class="font-mono text-text">${systemPrompt.chars()}</span>
+                            <span class="ml-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${systemPrompt.fromSettings() ? "bg-primary/15 text-primary" : "bg-surface text-text-muted"}">${systemPrompt.source()}</span>
+                        </p>
+                        <p class="text-xs text-text-muted">
+                            Leave empty to use the built-in prompt. The JSON answer schema at the end must survive your edits,
+                            otherwise every cluster ends without an answer. For project-specific rules prefer Project notes.
+                        </p>
+                        <details class="text-xs text-text-muted">
+                            <!-- 14px above and below a 16px line make the hit target 44px, the smallest one a finger hits reliably. -->
+                            <summary class="cursor-pointer select-none py-[14px]">Built-in prompt</summary>
+                            <pre class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-surface p-3 font-mono text-xs text-text">${aiBuiltInPrompt}</pre>
+                        </details>
+                    </div>
+
+                    !{ var promptNotes = ai.promptNotes(); }
+                    <div class="space-y-1">
+                        <label for="ai-prompt-notes" class="block text-sm font-medium text-text">Project notes</label>
+                        <textarea name="promptNotes" id="ai-prompt-notes" rows="5" class="form-field">${promptNotes.override()}</textarea>
+                        <p class="text-xs text-text-muted">
+                            In force: <span class="font-mono text-text">${promptNotes.chars()}</span>
+                            <span class="ml-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${promptNotes.fromSettings() ? "bg-primary/15 text-primary" : "bg-surface text-text-muted"}">${promptNotes.source()}</span>
+                        </p>
+                        <p class="text-xs text-text-muted">
+                            Rules of this project, added to every cluster prompt as a section of its own - what the model cannot
+                            know from the results alone ("a 502 from the gateway on the ift-2 stand is infrastructure").
+                        </p>
                     </div>
 
                     <div class="flex flex-wrap items-center gap-3">

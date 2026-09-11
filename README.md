@@ -357,17 +357,27 @@ starts by itself once step 1 has committed, so a CI pipeline only adds the one J
 
 Eight of the `allure-ai.*` settings can be changed while the server runs, in **Admin -> Settings**,
 card *AI analysis*: `enabled`, `opencodeUrl`, `provider`, `model`, `agent`, `parallel` (1-8),
-`timeoutSeconds` (30-3600) and `auto`. `cache-dir` and `sweep-cron` are configuration only - moving
-the copies or rescheduling a cron while a job is running is not a settings change.
+`timeoutSeconds` (30-3600) and `auto`. Two more live in that card only, because the analysis core
+carries them itself and no `allure-ai.*` property exists for either: the *system prompt* and the
+*project notes*. `cache-dir` and `sweep-cron` are configuration only - moving the copies or
+rescheduling a cron while a job is running is not a settings change.
 
 - A field left **empty** (or `Default (configuration)` in a list) means "no override": the value
   from the configuration stays in force. The badge next to every field says which of the two is in
-  force right now, `SETTINGS` or `CONFIGURATION`. *Reset to configuration* clears all eight at once.
+  force right now, `SETTINGS`, `CONFIGURATION` or `BUILT-IN` for a prompt nobody has overridden.
+  *Reset to configuration* clears all ten at once.
 - The settings row wins over the configuration, `enabled` included: the panel can switch the
   analysis on when the configuration has it off, and off when it has it on. While it is off,
   `POST /api/report/{uuid}/ai` answers `409` and the analysis button disappears from the reports
   grid, while the AI status badges of the reports stay: switching the analysis off hides what it
   could still start, not what it has already produced.
+- *System prompt* (up to 16000 characters) replaces the instruction the analysis core sends with every
+  cluster: the role, the cause classes, the rules and the JSON schema of the answer. The built-in text
+  is shown under *Built-in prompt* on the card, to be copied and edited rather than rewritten - an
+  edit that breaks the answer schema ends every cluster of every night without an answer.
+- *Project notes* (up to 4000 characters) are safer and enough for most cases: they are added to every
+  cluster prompt as a section of its own, for what the model cannot know from the results ("a 502 from
+  the gateway on the ift-2 stand is infrastructure"). The facts of a cluster prompt are not editable.
 - *Check connection* calls `GET <opencodeUrl>/config/providers` with the values currently in the
   form (5 s to connect, 5 s to answer) and lists the providers it got back, saying whether the
   provider/model pair is among them. Nothing is saved by a check.

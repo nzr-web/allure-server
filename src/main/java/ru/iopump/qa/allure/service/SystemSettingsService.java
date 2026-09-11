@@ -160,12 +160,18 @@ public class SystemSettingsService implements ApplicationRunner {
         entity.setAiParallel(form.parallel());
         entity.setAiTimeoutSeconds(form.timeoutSeconds());
         entity.setAiAuto(form.auto());
+        entity.setAiSystemPrompt(form.systemPrompt());
+        entity.setAiPromptNotes(form.promptNotes());
         final Snapshot snapshot = saveAndPublish(entity, actorUsername);
         log.info("AI settings updated by '{}': {}", actorUsername, changed);
         return snapshot;
     }
 
-    /** Clears every AI override, so all eight settings fall back to the {@code allure-ai.*} configuration. */
+    /**
+     * Clears every AI override, so all ten settings fall back to what they are without the panel:
+     * the {@code allure-ai.*} configuration for the eight of them that have one, and the prompt
+     * built into the allure-ai core for the system prompt (with no project notes at all).
+     */
     @Transactional
     public Snapshot resetAiSettings(String actorUsername) {
         return updateAiSettings(AiSettingsForm.empty(), actorUsername);
@@ -199,6 +205,8 @@ public class SystemSettingsService implements ApplicationRunner {
         appendIfChanged(changed, "parallel", entity.getAiParallel(), form.parallel());
         appendIfChanged(changed, "timeoutSeconds", entity.getAiTimeoutSeconds(), form.timeoutSeconds());
         appendIfChanged(changed, "auto", entity.getAiAuto(), form.auto());
+        appendTextIfChanged(changed, "systemPrompt", entity.getAiSystemPrompt(), form.systemPrompt());
+        appendTextIfChanged(changed, "promptNotes", entity.getAiPromptNotes(), form.promptNotes());
         return changed.length() == 0 ? "nothing changed" : changed.toString();
     }
 
@@ -210,6 +218,23 @@ public class SystemSettingsService implements ApplicationRunner {
             changed.append(", ");
         }
         changed.append(name).append('=').append(after == null ? "default (configuration)" : after);
+    }
+
+    /**
+     * Same, but for the prompt texts: the audit line says how long the new text is, never what it
+     * says. A whole instruction in a log line would bury every other line of the startup log.
+     * A cleared prompt falls back to the text built into the allure-ai core, not to a configuration
+     * property - there is none for either prompt - so the line says {@code default (built-in)}.
+     */
+    private static void appendTextIfChanged(StringBuilder changed, String name, String before, String after) {
+        if (Objects.equals(before, after)) {
+            return;
+        }
+        if (changed.length() > 0) {
+            changed.append(", ");
+        }
+        changed.append(name).append('=')
+            .append(after == null ? "default (built-in)" : after.length() + " chars");
     }
 
     /**
@@ -227,17 +252,47 @@ public class SystemSettingsService implements ApplicationRunner {
                            String aiAgent,
                            Integer aiParallel,
                            Long aiTimeoutSeconds,
-                           Boolean aiAuto) {
+                           Boolean aiAuto,
+                           String aiSystemPrompt,
+                           String aiPromptNotes) {
 
         /** A snapshot with no AI override at all - used for the pre-startup fallback. */
         public Snapshot(boolean requireApiAuth, Instant updatedAt, String updatedByUsername) {
-            this(requireApiAuth, updatedAt, updatedByUsername, null, null, null, null, null, null, null, null);
+            this(requireApiAuth, updatedAt, updatedByUsername, null, null, null, null, null, null, null, null,
+                null, null);
         }
 
         static Snapshot of(SystemSettingsEntity entity) {
             return new Snapshot(entity.isRequireApiAuth(), entity.getUpdatedAt(), entity.getUpdatedByUsername(),
                 entity.getAiEnabled(), entity.getAiOpencodeUrl(), entity.getAiProvider(), entity.getAiModel(),
-                entity.getAiAgent(), entity.getAiParallel(), entity.getAiTimeoutSeconds(), entity.getAiAuto());
+                entity.getAiAgent(), entity.getAiParallel(), entity.getAiTimeoutSeconds(), entity.getAiAuto(),
+                entity.getAiSystemPrompt(), entity.getAiPromptNotes());
+        }
+
+        /**
+         * The record text with the two prompts replaced by their lengths: {@code run} logs the whole
+         * snapshot at startup, and a 16 000-character instruction there hides the rest of the line.
+         */
+        @Override
+        public String toString() {
+            return "Snapshot[requireApiAuth=" + requireApiAuth
+                + ", updatedAt=" + updatedAt
+                + ", updatedByUsername=" + updatedByUsername
+                + ", aiEnabled=" + aiEnabled
+                + ", aiOpencodeUrl=" + aiOpencodeUrl
+                + ", aiProvider=" + aiProvider
+                + ", aiModel=" + aiModel
+                + ", aiAgent=" + aiAgent
+                + ", aiParallel=" + aiParallel
+                + ", aiTimeoutSeconds=" + aiTimeoutSeconds
+                + ", aiAuto=" + aiAuto
+                + ", aiSystemPrompt=" + length(aiSystemPrompt)
+                + ", aiPromptNotes=" + length(aiPromptNotes)
+                + ']';
+        }
+
+        private static String length(String text) {
+            return text == null ? "null" : text.length() + " chars";
         }
     }
 }

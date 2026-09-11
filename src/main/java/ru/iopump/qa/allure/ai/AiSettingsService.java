@@ -3,6 +3,7 @@ package ru.iopump.qa.allure.ai;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import ru.iopump.qa.allure.service.SystemSettingsService;
+import ru.vtb.at.allureai.llm.PromptBuilder;
 
 /**
  * Effective settings of the AI analysis: the admin panel wins over the configuration.
@@ -38,7 +39,9 @@ public class AiSettingsService {
             resolve(snapshot.aiAgent(), properties.agent()),
             resolve(snapshot.aiParallel(), properties.parallel()),
             resolve(snapshot.aiTimeoutSeconds(), properties.timeoutSeconds()),
-            resolve(snapshot.aiAuto(), properties.auto())
+            resolve(snapshot.aiAuto(), properties.auto()),
+            resolveBuiltIn(snapshot.aiSystemPrompt(), PromptBuilder.SYSTEM),
+            resolveBuiltIn(snapshot.aiPromptNotes(), null)
         );
     }
 
@@ -48,12 +51,24 @@ public class AiSettingsService {
             : new Value<>(fromSettings, Source.SETTINGS);
     }
 
+    /**
+     * Same, for the two settings the {@code allure-ai.*} configuration knows nothing about: what
+     * they fall back to is not a configured value but the behaviour of the core itself.
+     */
+    private static Value<String> resolveBuiltIn(String fromSettings, String builtIn) {
+        return fromSettings == null
+            ? new Value<>(builtIn, Source.BUILT_IN)
+            : new Value<>(fromSettings, Source.SETTINGS);
+    }
+
     /** Where an effective value comes from. */
     public enum Source {
         /** From {@code allure-ai.*}: yaml, environment or a command-line argument. */
         CONFIGURATION,
         /** From the settings row, i.e. entered in the admin panel. */
-        SETTINGS
+        SETTINGS,
+        /** Neither configuration nor settings: the core's built-in text. */
+        BUILT_IN
     }
 
     /**
@@ -69,7 +84,7 @@ public class AiSettingsService {
         }
     }
 
-    /** The eight settings of the AI analysis as they are in force at one moment. */
+    /** The ten settings of the AI analysis as they are in force at one moment. */
     public record Effective(Value<Boolean> enabled,
                             Value<String> opencodeUrl,
                             Value<String> provider,
@@ -77,6 +92,8 @@ public class AiSettingsService {
                             Value<String> agent,
                             Value<Integer> parallel,
                             Value<Long> timeoutSeconds,
-                            Value<Boolean> auto) {
+                            Value<Boolean> auto,
+                            Value<String> systemPrompt,
+                            Value<String> promptNotes) {
     }
 }

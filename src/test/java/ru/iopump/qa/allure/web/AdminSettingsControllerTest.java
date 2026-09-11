@@ -26,6 +26,7 @@ import ru.iopump.qa.allure.security.CurrentUserProvider;
 import ru.iopump.qa.allure.service.ApiTokenService;
 import ru.iopump.qa.allure.service.SystemSettingsService;
 import ru.iopump.qa.allure.web.dto.AiSettingsForm;
+import ru.vtb.at.allureai.llm.PromptBuilder;
 
 import java.time.Instant;
 import java.util.Map;
@@ -67,6 +68,7 @@ class AdminSettingsControllerTest {
     private static final String FLASH_MESSAGE_KEY = "message";
     private static final String LEVEL_SUCCESS = "success";
     private static final String ADMIN_USERNAME = "admin";
+    private static final String SAVED_PROMPT = "You are a test. Answer with one JSON object.";
 
     @Autowired
     private MockMvc mockMvc;
@@ -221,14 +223,65 @@ class AdminSettingsControllerTest {
                 .param("agent", "   ")
                 .param("parallel", "")
                 .param("timeoutSeconds", "")
-                .param("auto", ""))
+                .param("auto", "")
+                .param("systemPrompt", "")
+                .param("promptNotes", "   "))
             .andExpect(status().is3xxRedirection())
             .andExpect(redirectedUrl(SETTINGS_PATH));
 
         // THEN - the service is handed nulls for them, and a trimmed value for the url
         verify(systemSettingsService).updateAiSettings(
-            eq(new AiSettingsForm(null, "http://127.0.0.1:4096", "lmstudio", null, null, null, null, null)),
+            eq(new AiSettingsForm(null, "http://127.0.0.1:4096", "lmstudio", null, null, null, null, null,
+                null, null)),
             eq(ADMIN_USERNAME));
+    }
+
+    @Test
+    @DisplayName("should render both prompt textareas and the built-in prompt when GET /app/admin/settings")
+    void index_rendersThePromptEditors() throws Exception {
+        // GIVEN - a settings row with no prompt override
+        when(systemSettingsService.current())
+            .thenReturn(new SystemSettingsService.Snapshot(false, Instant.now(), ADMIN_USERNAME));
+
+        // WHEN - GET the settings page
+        MvcResult result = mockMvc.perform(get(SETTINGS_PATH))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        // THEN - both textareas are on the page, inside the form that saves the card
+        final String body = result.getResponse().getContentAsString();
+        assertThat(body).as("form posting to the save endpoint").contains("action=\"" + AI_PATH + "\"");
+        assertThat(body).as("system prompt editor").contains("<textarea name=\"systemPrompt\"");
+        assertThat(body).as("project notes editor").contains("<textarea name=\"promptNotes\"");
+
+        // AND - the built-in prompt is there to be copied, not only its heading
+        assertThat(body).as("heading of the built-in prompt block").contains("Built-in prompt");
+        assertThat(body).as("text of the built-in prompt on the page").contains("causeClass");
+        assertThat(body).as("origin badge of a prompt nobody overrode").contains("BUILT-IN");
+    }
+
+    @Test
+    @DisplayName("should put a saved prompt into the textarea and its length into the 'In force' line")
+    void index_rendersASavedPromptOverride() throws Exception {
+        // GIVEN - a settings row where the system prompt is overridden
+        when(systemSettingsService.current()).thenReturn(new SystemSettingsService.Snapshot(
+            false, Instant.now(), ADMIN_USERNAME,
+            null, null, null, null, null, null, null, null, SAVED_PROMPT, null));
+        when(aiSettingsService.effective()).thenReturn(effectiveWithSavedSystemPrompt());
+
+        // WHEN - GET the settings page
+        MvcResult result = mockMvc.perform(get(SETTINGS_PATH))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        // THEN - the saved text is what the textarea offers for editing
+        final String body = result.getResponse().getContentAsString();
+        assertThat(body).as("saved prompt inside the textarea").contains(SAVED_PROMPT + "</textarea>");
+
+        // AND - the line under it counts the characters in force and names the settings as their origin
+        assertThat(body).as("'In force' line of an overridden prompt")
+            .contains("In force: <span class=\"font-mono text-text\">" + SAVED_PROMPT.length() + " characters</span>");
+        assertThat(body).as("origin badge of an overridden prompt").contains(">SETTINGS<");
     }
 
     ///// helpers /////
@@ -243,7 +296,31 @@ class AdminSettingsControllerTest {
             configured("allure-ai"),
             configured(CONFIGURED_PARALLEL),
             configured(300L),
-            configured(false)
+            configured(false),
+            builtIn(PromptBuilder.SYSTEM),
+            builtIn((String) null)
+        );
+    }
+
+    /** A prompt nobody has overridden: what is in force is the text the analysis core carries itself. */
+    private static <T> AiSettingsService.Value<T> builtIn(T value) {
+        return new AiSettingsService.Value<>(value, AiSettingsService.Source.BUILT_IN);
+    }
+
+    /** Everything from the configuration, except the system prompt, which the admin has saved. */
+    private static AiSettingsService.Effective effectiveWithSavedSystemPrompt() {
+        final AiSettingsService.Effective configured = configuredEffective();
+        return new AiSettingsService.Effective(
+            configured.enabled(),
+            configured.opencodeUrl(),
+            configured.provider(),
+            configured.model(),
+            configured.agent(),
+            configured.parallel(),
+            configured.timeoutSeconds(),
+            configured.auto(),
+            new AiSettingsService.Value<>(SAVED_PROMPT, AiSettingsService.Source.SETTINGS),
+            builtIn((String) null)
         );
     }
 

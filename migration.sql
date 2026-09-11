@@ -62,3 +62,8 @@ ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_agent varchar(64);
 ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_parallel int;
 ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_timeout_seconds bigint;
 ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_auto boolean;
+-- The two editable prompts. Explicit varchar so ddl-auto:update and this script agree on the type;
+-- NULL means "not set in the admin panel": the system prompt then comes built in with the core and
+-- no project-notes section is added to the cluster prompt.
+ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_system_prompt varchar(16000);
+ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_prompt_notes varchar(4000);

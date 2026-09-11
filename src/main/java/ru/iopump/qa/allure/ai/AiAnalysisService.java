@@ -384,6 +384,8 @@ public class AiAnalysisService {
             .agent(effective.agent().value())
             .parallel(effective.parallel().value())
             .timeoutSeconds(effective.timeoutSeconds().value())
+            .systemPrompt(effective.systemPrompt().value())
+            .promptNotes(effective.promptNotes().value())
             .out(logStream());
         final String previousUuid = job.getPreviousUuid();
         if (previousUuid != null && Files.isDirectory(resultsOf(previousUuid))) {

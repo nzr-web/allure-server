@@ -25,6 +25,8 @@ import ru.iopump.qa.allure.service.SystemSettingsService;
  * @param parallel       clusters analysed in parallel inside one job
  * @param timeoutSeconds timeout of a single model answer
  * @param auto           start the worker right after a report is generated with {@code aiAnalysis}
+ * @param systemPrompt   instruction sent to the model instead of the one built into the allure-ai core
+ * @param promptNotes    project-specific rules added to every cluster prompt as its own section
  */
 public record AiSettingsForm(
     @Nullable Boolean enabled,
@@ -50,7 +52,15 @@ public record AiSettingsForm(
     @Max(value = 3600, message = "must be between 30 and 3600")
     Long timeoutSeconds,
 
-    @Nullable Boolean auto
+    @Nullable Boolean auto,
+
+    @Nullable
+    @Size(max = 16000, message = "must be at most 16000 characters")
+    String systemPrompt,
+
+    @Nullable
+    @Size(max = 4000, message = "must be at most 4000 characters")
+    String promptNotes
 ) {
 
     /**
@@ -62,7 +72,7 @@ public record AiSettingsForm(
 
     /** An all-{@code null} form: every setting falls back to the configuration. */
     public static AiSettingsForm empty() {
-        return new AiSettingsForm(null, null, null, null, null, null, null, null);
+        return new AiSettingsForm(null, null, null, null, null, null, null, null, null, null);
     }
 
     /** The overrides currently stored in the settings row, to pre-fill the card on a GET. */
@@ -75,7 +85,9 @@ public record AiSettingsForm(
             snapshot.aiAgent(),
             snapshot.aiParallel(),
             snapshot.aiTimeoutSeconds(),
-            snapshot.aiAuto()
+            snapshot.aiAuto(),
+            snapshot.aiSystemPrompt(),
+            snapshot.aiPromptNotes()
         );
     }
 }

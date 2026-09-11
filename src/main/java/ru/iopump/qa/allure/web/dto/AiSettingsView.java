@@ -17,7 +17,9 @@ public record AiSettingsView(Item enabled,
                              Item agent,
                              Item parallel,
                              Item timeoutSeconds,
-                             Item auto) {
+                             Item auto,
+                             Text systemPrompt,
+                             Text promptNotes) {
 
     public static AiSettingsView from(AiSettingsForm form, AiSettingsService.Effective effective) {
         return new AiSettingsView(
@@ -28,7 +30,9 @@ public record AiSettingsView(Item enabled,
             Item.of(form.agent(), effective.agent()),
             Item.of(form.parallel(), effective.parallel()),
             Item.of(form.timeoutSeconds(), effective.timeoutSeconds()),
-            Item.of(form.auto(), effective.auto())
+            Item.of(form.auto(), effective.auto()),
+            Text.of(form.systemPrompt(), effective.systemPrompt()),
+            Text.of(form.promptNotes(), effective.promptNotes())
         );
     }
 
@@ -47,6 +51,30 @@ public record AiSettingsView(Item enabled,
                 override == null ? "" : String.valueOf(override),
                 String.valueOf(effective.value()),
                 effective.source().name(),
+                effective.fromSettings()
+            );
+        }
+    }
+
+    /**
+     * One of the two prompt texts. Unlike {@link Item} it never carries the value in force: a system
+     * prompt is thousands of characters long and would be unreadable in a label - the card shows its
+     * length instead, and the text itself either sits in the textarea (an override) or under the
+     * "Built-in prompt" details (the core's own).
+     *
+     * @param override     what to put into the textarea, empty string when the prompt is not overridden
+     * @param chars        how long the prompt in force is, or "none" when there is no text at all
+     * @param source       {@code SETTINGS} or {@code BUILT-IN}, shown as the origin badge
+     * @param fromSettings whether the text in force is the override (drives the badge colour)
+     */
+    public record Text(String override, String chars, String source, boolean fromSettings) {
+
+        static Text of(String override, AiSettingsService.Value<String> effective) {
+            final String inForce = effective.value();
+            return new Text(
+                override == null ? "" : override,
+                inForce == null ? "none" : inForce.length() + " characters",
+                effective.source().name().replace('_', '-'),
                 effective.fromSettings()
             );
         }

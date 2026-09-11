@@ -90,4 +90,17 @@ public class SystemSettingsEntity {
     @Nullable
     @Column(name = "ai_auto")
     private Boolean aiAuto;
+
+    // The two prompt texts are kept out of toString(): SystemSettingsService logs the whole
+    // snapshot at startup, and a 16 000-character instruction in that line hides everything else.
+
+    @Nullable
+    @ToString.Exclude
+    @Column(name = "ai_system_prompt", length = 16000)
+    private String aiSystemPrompt;
+
+    @Nullable
+    @ToString.Exclude
+    @Column(name = "ai_prompt_notes", length = 4000)
+    private String aiPromptNotes;
 }

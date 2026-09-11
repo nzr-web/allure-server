@@ -24,6 +24,7 @@ import ru.iopump.qa.allure.web.dto.AiCheckView;
 import ru.iopump.qa.allure.web.dto.AiSettingsForm;
 import ru.iopump.qa.allure.web.dto.AiSettingsView;
 import ru.iopump.qa.allure.web.dto.SystemSettingsView;
+import ru.vtb.at.allureai.llm.PromptBuilder;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -60,6 +61,18 @@ public class AdminSettingsController {
     @InitBinder
     void trimEmptyStringsToNull(WebDataBinder binder) {
         binder.registerCustomEditor(String.class, new StringTrimmerEditor(true));
+    }
+
+    /**
+     * The instruction built into the allure-ai core, shown on the card so that an admin edits a copy
+     * of it instead of writing one from scratch. A model attribute and not a field of
+     * {@link AiSettingsView}: it is the same constant on every request and says nothing about what is
+     * stored in the settings row. Every POST handler here takes {@code RedirectAttributes}, so this
+     * attribute is not appended to a redirect url.
+     */
+    @ModelAttribute("aiBuiltInPrompt")
+    String aiBuiltInPrompt() {
+        return PromptBuilder.SYSTEM;
     }
 
     @GetMapping

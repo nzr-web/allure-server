@@ -9,6 +9,8 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -32,6 +34,7 @@ final class OpenCodeStub implements AutoCloseable {
 
     private final HttpServer server;
     private final AtomicInteger sessions = new AtomicInteger();
+    private final List<String> messages = new CopyOnWriteArrayList<>();
     private volatile Mode mode = Mode.ANSWERS;
 
     private OpenCodeStub(HttpServer server) {
@@ -65,6 +68,19 @@ final class OpenCodeStub implements AutoCloseable {
         return sessions.get();
     }
 
+    /**
+     * Raw bodies of the {@code POST /session/&#123;id&#125;/message} calls, in the order they arrived: what
+     * the core actually sent the model, prompts included.
+     */
+    List<String> messages() {
+        return List.copyOf(messages);
+    }
+
+    /** Forgets the recorded messages - the stub is shared by every test of its class. */
+    void clear() {
+        messages.clear();
+    }
+
     @Override
     public void close() {
         server.stop(0);
@@ -79,6 +95,7 @@ final class OpenCodeStub implements AutoCloseable {
         }
         if (path.endsWith("/message")) {
             new ObjectMapper().readTree(body); // the client must send a parseable prompt envelope
+            messages.add(new String(body, StandardCharsets.UTF_8));
             final String text = mode == Mode.ANSWERS ? ANALYSIS : NONSENSE;
             reply(exchange, "{\"info\":{\"id\":\"msg\",\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\""
                 + text.replace("\"", "\\\"") + "\"}]}");

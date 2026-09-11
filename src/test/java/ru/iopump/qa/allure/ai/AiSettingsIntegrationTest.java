@@ -1,5 +1,6 @@
 package ru.iopump.qa.allure.ai;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.AfterAll;
@@ -19,11 +20,14 @@ import ru.iopump.qa.allure.entity.UserEntity;
 import ru.iopump.qa.allure.repo.SystemSettingsRepository;
 import ru.iopump.qa.allure.repo.UserRepository;
 import ru.iopump.qa.allure.service.SystemSettingsService;
+import ru.vtb.at.allureai.llm.PromptBuilder;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -81,6 +85,16 @@ class AiSettingsIntegrationTest {
     private static final String CONFIGURED_MODEL = "qwen3.8";
     private static final String CONFIGURED_PROVIDER = "litellm";
     private static final long AWAIT_TIMEOUT_MS = 120_000L;
+    private static final String CUSTOM_SYSTEM_PROMPT =
+        "You are a test. Answer {\"causeClass\":\"infra\",\"confidence\":0.5,\"reason\":\"stub\","
+            + "\"recommendation\":\"stub\",\"bugDraft\":null}";
+    private static final String PROJECT_NOTES = "Stand ift-2 is down";
+    /**
+     * The heading the core puts above the project notes, escaped so this file stays ASCII: the
+     * section name comes from the core and is Russian, like every prompt it builds.
+     */
+    private static final String NOTES_HEADING =
+        "# \u0423\u043a\u0430\u0437\u0430\u043d\u0438\u044f \u043f\u0440\u043e\u0435\u043a\u0442\u0430";
 
     /** The stub address is never a property: it must reach the analysis through the settings row. */
     private static final OpenCodeStub STUB;
@@ -119,6 +133,7 @@ class AiSettingsIntegrationTest {
     @BeforeEach
     void cleanSettings() {
         STUB.mode(OpenCodeStub.Mode.ANSWERS);
+        STUB.clear();
         systemSettingsService.resetAiSettings("test-setup");
         systemSettingsService.updateRequireApiAuth(false, "test-setup");
         clearTemporaryPassword();
@@ -177,7 +192,8 @@ class AiSettingsIntegrationTest {
         // GIVEN - a row with overrides
         saveSettings(Map.of("enabled", "false", "opencodeUrl", "http://127.0.0.1:4096",
             "provider", "lmstudio", "model", "other", "agent", "other-agent",
-            "parallel", "8", "timeoutSeconds", "600", "auto", "true"));
+            "parallel", "8", "timeoutSeconds", "600", "auto", "true",
+            "systemPrompt", CUSTOM_SYSTEM_PROMPT, "promptNotes", PROJECT_NOTES));
 
         // WHEN - the reset button is pressed
         mockMvc.perform(post(AI_RESET_PATH).with(adminUser()).with(csrf()))
@@ -186,8 +202,9 @@ class AiSettingsIntegrationTest {
         // THEN - not a single override is left in the row
         final SystemSettingsEntity row = settingsRow();
         assertThat(new Object[]{row.getAiEnabled(), row.getAiOpencodeUrl(), row.getAiProvider(),
-            row.getAiModel(), row.getAiAgent(), row.getAiParallel(), row.getAiTimeoutSeconds(), row.getAiAuto()})
-            .as("all eight AI columns after a reset")
+            row.getAiModel(), row.getAiAgent(), row.getAiParallel(), row.getAiTimeoutSeconds(), row.getAiAuto(),
+            row.getAiSystemPrompt(), row.getAiPromptNotes()})
+            .as("all ten AI columns after a reset")
             .containsOnlyNulls();
 
         // AND - everything is back to the configuration
@@ -310,7 +327,7 @@ class AiSettingsIntegrationTest {
     @DisplayName("should keep the two cards apart: saving one must not reset the other")
     void theTwoCardsDoNotOverwriteEachOther() throws Exception {
         // GIVEN - saved AI settings
-        saveSettings(Map.of("provider", "lmstudio", "parallel", "3"));
+        saveSettings(Map.of("provider", "lmstudio", "parallel", "3", "promptNotes", PROJECT_NOTES));
 
         // WHEN - the API authentication toggle is saved afterwards
         mockMvc.perform(post(SETTINGS_PATH + "/require-api-auth").with(adminUser()).with(csrf())
@@ -319,9 +336,15 @@ class AiSettingsIntegrationTest {
 
         // THEN - the AI settings survived, in the row and in the cached snapshot
         assertThat(settingsRow().getAiProvider()).as("provider after the other card was saved").isEqualTo("lmstudio");
+        assertThat(settingsRow().getAiPromptNotes())
+            .as("project notes after the other card was saved")
+            .isEqualTo(PROJECT_NOTES);
         assertThat(systemSettingsService.current().aiProvider())
             .as("provider in the cached snapshot after the other card was saved")
             .isEqualTo("lmstudio");
+        assertThat(systemSettingsService.current().aiPromptNotes())
+            .as("project notes in the cached snapshot after the other card was saved")
+            .isEqualTo(PROJECT_NOTES);
 
         // WHEN - the AI card is saved again
         saveSettings(Map.of("provider", "lmstudio", "model", "other"));
@@ -388,7 +411,122 @@ class AiSettingsIntegrationTest {
             .isGreaterThan(sessionsBefore);
     }
 
+    @Test
+    @DisplayName("should send the saved system prompt and project notes to the model")
+    void savedPromptsReachTheModel() throws Exception {
+        // GIVEN - both prompts saved in the card, with the stub as the OpenCode of the settings
+        saveSettings(Map.of("opencodeUrl", stubUrl(),
+            "systemPrompt", CUSTOM_SYSTEM_PROMPT,
+            "promptNotes", PROJECT_NOTES));
+
+        // AND - a report generated with the analysis
+        final String reportUuid = generate("ai-settings-prompts",
+            AllureResultsFixture.write(RESULTS_DIR, 5, "alpha"));
+
+        // WHEN - the second button starts the worker
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai"))
+            .andExpect(status().isAccepted());
+        assertThat(awaitFinished(reportUuid))
+            .as("job run with the prompts from the settings")
+            .isEqualTo(AiJobStatus.DONE);
+
+        // THEN - every message the model got carried the saved texts: the system prompt as 'system',
+        // the project notes as a section of the cluster prompt
+        final List<JsonNode> messages = stubMessages();
+        assertThat(messages).as("messages the stub received while the job was running").isNotEmpty();
+        assertThat(messages).allSatisfy(message -> {
+            assertThat(message.path("system").asText())
+                .as("'system' of the message sent to the model")
+                .isEqualTo(CUSTOM_SYSTEM_PROMPT);
+            assertThat(message.path("parts").path(0).path("text").asText())
+                .as("cluster prompt sent to the model")
+                .contains(NOTES_HEADING)
+                .contains(PROJECT_NOTES);
+        });
+    }
+
+    @Test
+    @DisplayName("should fall back to the built-in prompt and to no notes at all when both textareas are empty")
+    void emptyPromptsFallBackToTheBuiltInText() throws Exception {
+        // GIVEN - both prompts overridden
+        saveSettings(Map.of("systemPrompt", CUSTOM_SYSTEM_PROMPT, "promptNotes", PROJECT_NOTES));
+
+        // WHEN - the card is saved again with both textareas cleared
+        saveSettings(Map.of("systemPrompt", "", "promptNotes", "   "));
+
+        // THEN - nothing is left in the row
+        final SystemSettingsEntity row = settingsRow();
+        assertThat(row.getAiSystemPrompt()).as("system prompt after an empty textarea").isNull();
+        assertThat(row.getAiPromptNotes()).as("project notes after a blank textarea").isNull();
+
+        // AND - what is in force is the text the core carries itself, with no project notes at all
+        final AiSettingsService.Effective effective = aiSettingsService.effective();
+        assertThat(effective.systemPrompt())
+            .as("system prompt in force with an empty override")
+            .isEqualTo(new AiSettingsService.Value<>(PromptBuilder.SYSTEM, AiSettingsService.Source.BUILT_IN));
+        assertThat(effective.promptNotes())
+            .as("project notes in force with an empty override")
+            .isEqualTo(new AiSettingsService.Value<String>(null, AiSettingsService.Source.BUILT_IN));
+    }
+
+    @Test
+    @DisplayName("should reject a system prompt longer than the column and keep the stored one")
+    void rejectsASystemPromptLongerThanTheColumn() throws Exception {
+        // GIVEN - a saved prompt
+        saveSettings(Map.of("systemPrompt", CUSTOM_SYSTEM_PROMPT));
+
+        // WHEN - a prompt one character longer than the column arrives
+        final MvcResult result = mockMvc.perform(post(AI_PATH).with(adminUser()).with(csrf())
+                .param("systemPrompt", "x".repeat(16001)))
+            .andExpect(status().is3xxRedirection())
+            .andReturn();
+
+        // THEN - the form is rejected before the database is touched
+        final Map<?, ?> flash = (Map<?, ?>) result.getFlashMap().get("flash");
+        assertThat(String.valueOf(flash.get("message")))
+            .as("flash toast of a too long system prompt")
+            .contains("Form rejected");
+
+        // AND - the prompt saved before is still the one stored
+        assertThat(settingsRow().getAiSystemPrompt())
+            .as("system prompt after a rejected form")
+            .isEqualTo(CUSTOM_SYSTEM_PROMPT);
+    }
+
+    @Test
+    @DisplayName("should reject project notes longer than the column and keep the stored ones")
+    void rejectsProjectNotesLongerThanTheColumn() throws Exception {
+        // GIVEN - saved notes
+        saveSettings(Map.of("promptNotes", PROJECT_NOTES));
+
+        // WHEN - notes one character longer than the column arrive
+        final MvcResult result = mockMvc.perform(post(AI_PATH).with(adminUser()).with(csrf())
+                .param("promptNotes", "y".repeat(4001)))
+            .andExpect(status().is3xxRedirection())
+            .andReturn();
+
+        // THEN - the form is rejected before the database is touched
+        final Map<?, ?> flash = (Map<?, ?>) result.getFlashMap().get("flash");
+        assertThat(String.valueOf(flash.get("message")))
+            .as("flash toast of too long project notes")
+            .contains("Form rejected");
+
+        // AND - the notes saved before are still the ones stored
+        assertThat(settingsRow().getAiPromptNotes())
+            .as("project notes after a rejected form")
+            .isEqualTo(PROJECT_NOTES);
+    }
+
     //// PRIVATE ////
+
+    /** What the stub was sent, parsed: a contains() over the raw JSON would pass on the wrong field. */
+    private List<JsonNode> stubMessages() throws Exception {
+        final List<JsonNode> parsed = new ArrayList<>();
+        for (String body : STUB.messages()) {
+            parsed.add(objectMapper.readTree(body));
+        }
+        return parsed;
+    }
 
     private static String stubUrl() {
         return "http://127.0.0.1:" + STUB.port();
