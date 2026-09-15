@@ -41,7 +41,9 @@ public class AiSettingsService {
             resolve(snapshot.aiTimeoutSeconds(), properties.timeoutSeconds()),
             resolve(snapshot.aiAuto(), properties.auto()),
             resolveBuiltIn(snapshot.aiSystemPrompt(), PromptBuilder.SYSTEM),
-            resolveBuiltIn(snapshot.aiPromptNotes(), null)
+            resolveBuiltIn(snapshot.aiPromptNotes(), null),
+            resolve(snapshot.aiOpencodeUsername(), properties.opencodeUsername()),
+            resolve(snapshot.aiOpencodePassword(), properties.opencodePassword())
         );
     }
 
@@ -84,7 +86,7 @@ public class AiSettingsService {
         }
     }
 
-    /** The ten settings of the AI analysis as they are in force at one moment. */
+    /** The twelve settings of the AI analysis as they are in force at one moment. */
     public record Effective(Value<Boolean> enabled,
                             Value<String> opencodeUrl,
                             Value<String> provider,
@@ -94,6 +96,8 @@ public class AiSettingsService {
                             Value<Long> timeoutSeconds,
                             Value<Boolean> auto,
                             Value<String> systemPrompt,
-                            Value<String> promptNotes) {
+                            Value<String> promptNotes,
+                            Value<String> opencodeUsername,
+                            Value<String> opencodePassword) {
     }
 }

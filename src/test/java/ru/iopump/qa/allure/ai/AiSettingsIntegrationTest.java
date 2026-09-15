@@ -67,7 +67,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "allure-ai.parallel=1",
     "allure-ai.timeout-seconds=30",
     "allure-ai.auto=false",
-    "allure-ai.sweep-cron=-"
+    "allure-ai.sweep-cron=-",
+    // A password in the configuration, so that every password test proves the settings row wins:
+    // the stub asks for the one stored in the database, and this one would earn a 401.
+    "allure-ai.opencode-password=0d1f4f1a-3c19-4a4a-8f0a-1b3c5d7e9f00"
 })
 class AiSettingsIntegrationTest {
 
@@ -89,6 +92,13 @@ class AiSettingsIntegrationTest {
         "You are a test. Answer {\"causeClass\":\"infra\",\"confidence\":0.5,\"reason\":\"stub\","
             + "\"recommendation\":\"stub\",\"bugDraft\":null}";
     private static final String PROJECT_NOTES = "Stand ift-2 is down";
+    /** Passwords are UUIDs: nothing else on the settings page can look like one by accident. */
+    private static final String YAML_PASSWORD = "0d1f4f1a-3c19-4a4a-8f0a-1b3c5d7e9f00";
+    private static final String STORED_PASSWORD = "5a2e9c73-6b41-4f8d-9c2a-7e0b4d6f8a13";
+    private static final String WRONG_PASSWORD = "c7b9e105-2d34-4e6f-8a1b-3c5d7e9f0a24";
+    private static final String STORED_USERNAME = "bot";
+    private static final String UNAUTHORIZED_TEXT =
+        "OpenCode rejected the credentials (401): the server password is missing or wrong";
     /**
      * The heading the core puts above the project notes, escaped so this file stays ASCII: the
      * section name comes from the core and is Russian, like every prompt it builds.
@@ -130,9 +140,13 @@ class AiSettingsIntegrationTest {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private AiProperties aiProperties;
+
     @BeforeEach
     void cleanSettings() {
         STUB.mode(OpenCodeStub.Mode.ANSWERS);
+        STUB.requireNoPassword();
         STUB.clear();
         systemSettingsService.resetAiSettings("test-setup");
         systemSettingsService.updateRequireApiAuth(false, "test-setup");
@@ -190,10 +204,14 @@ class AiSettingsIntegrationTest {
     @DisplayName("should clear every override when 'Reset to configuration' is pressed")
     void resetClearsEveryOverride() throws Exception {
         // GIVEN - a row with overrides
-        saveSettings(Map.of("enabled", "false", "opencodeUrl", "http://127.0.0.1:4096",
-            "provider", "lmstudio", "model", "other", "agent", "other-agent",
-            "parallel", "8", "timeoutSeconds", "600", "auto", "true",
-            "systemPrompt", CUSTOM_SYSTEM_PROMPT, "promptNotes", PROJECT_NOTES));
+        // Map.ofEntries and not Map.of: twelve overrides are two pairs more than Map.of takes
+        saveSettings(Map.ofEntries(
+            Map.entry("enabled", "false"), Map.entry("opencodeUrl", "http://127.0.0.1:4096"),
+            Map.entry("provider", "lmstudio"), Map.entry("model", "other"),
+            Map.entry("agent", "other-agent"), Map.entry("parallel", "8"),
+            Map.entry("timeoutSeconds", "600"), Map.entry("auto", "true"),
+            Map.entry("systemPrompt", CUSTOM_SYSTEM_PROMPT), Map.entry("promptNotes", PROJECT_NOTES),
+            Map.entry("opencodeUsername", STORED_USERNAME), Map.entry("opencodePassword", STORED_PASSWORD)));
 
         // WHEN - the reset button is pressed
         mockMvc.perform(post(AI_RESET_PATH).with(adminUser()).with(csrf()))
@@ -203,8 +221,9 @@ class AiSettingsIntegrationTest {
         final SystemSettingsEntity row = settingsRow();
         assertThat(new Object[]{row.getAiEnabled(), row.getAiOpencodeUrl(), row.getAiProvider(),
             row.getAiModel(), row.getAiAgent(), row.getAiParallel(), row.getAiTimeoutSeconds(), row.getAiAuto(),
-            row.getAiSystemPrompt(), row.getAiPromptNotes()})
-            .as("all ten AI columns after a reset")
+            row.getAiSystemPrompt(), row.getAiPromptNotes(),
+            row.getAiOpencodeUsername(), row.getAiOpencodePassword()})
+            .as("all twelve AI columns after a reset")
             .containsOnlyNulls();
 
         // AND - everything is back to the configuration
@@ -517,6 +536,199 @@ class AiSettingsIntegrationTest {
             .isEqualTo(PROJECT_NOTES);
     }
 
+    @Test
+    @DisplayName("should send the stored OpenCode credentials to the model, not the configured ones")
+    void storedCredentialsReachOpenCode() throws Exception {
+        // GIVEN - an OpenCode that answers only to the pair stored in the settings row, while the
+        // configuration carries a different password
+        STUB.requirePassword(STORED_USERNAME, STORED_PASSWORD);
+        saveSettings(Map.of("opencodeUrl", stubUrl(),
+            "opencodeUsername", STORED_USERNAME,
+            "opencodePassword", STORED_PASSWORD));
+
+        // AND - a report generated with the analysis
+        final String reportUuid = generate("ai-settings-password",
+            AllureResultsFixture.write(RESULTS_DIR, 6, "alpha"));
+
+        // WHEN - the second button starts the worker
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai"))
+            .andExpect(status().isAccepted());
+
+        // THEN - the job ran through: every request carried the stored pair, so nothing got a 401
+        assertThat(awaitFinished(reportUuid))
+            .as("job run against an OpenCode that demands the stored password")
+            .isEqualTo(AiJobStatus.DONE);
+        assertThat(STUB.authHeaders())
+            .as("Authorization headers the stub received while the job was running")
+            .isNotEmpty()
+            .allSatisfy(header -> assertThat(header).isEqualTo(basicHeader(STORED_USERNAME, STORED_PASSWORD)));
+        assertThat(STUB.authHeaders())
+            .as("the configured password must not be used while one is stored")
+            .doesNotContain(basicHeader(STORED_USERNAME, YAML_PASSWORD));
+    }
+
+    @Test
+    @DisplayName("should keep the stored password on an empty box and drop it on the checkbox")
+    void emptyPasswordBoxKeepsTheStoredOneAndTheCheckboxClearsIt() throws Exception {
+        // GIVEN - a stored password
+        saveSettings(Map.of("opencodePassword", STORED_PASSWORD));
+        assertThat(settingsRow().getAiOpencodePassword()).as("password after it was saved").isEqualTo(STORED_PASSWORD);
+
+        // WHEN - the card is saved again with the password box empty, as it is always rendered
+        saveSettings(Map.of("provider", "lmstudio", "opencodePassword", ""));
+
+        // THEN - the stored password is still there: an empty box is not a request to clear it
+        assertThat(settingsRow().getAiOpencodePassword())
+            .as("password after a save with an empty box")
+            .isEqualTo(STORED_PASSWORD);
+        assertThat(settingsRow().getAiProvider()).as("the rest of the card was saved").isEqualTo("lmstudio");
+
+        // WHEN - the clearing checkbox is ticked, with a password typed into the box as well
+        saveSettings(Map.of("opencodePassword", WRONG_PASSWORD, "clearOpencodePassword", "on"));
+
+        // THEN - the checkbox wins: nothing is stored
+        assertThat(settingsRow().getAiOpencodePassword())
+            .as("password after the clearing checkbox won over a typed one")
+            .isNull();
+        assertThat(aiSettingsService.effective().opencodePassword())
+            .as("password in force once nothing is stored")
+            .isEqualTo(new AiSettingsService.Value<>(YAML_PASSWORD, AiSettingsService.Source.CONFIGURATION));
+    }
+
+    @Test
+    @DisplayName("should store a password with the spaces around it, they are part of it")
+    void storesThePasswordWithItsSpaces() throws Exception {
+        // GIVEN - a password that begins and ends with a space
+        final String padded = " pa ss ";
+
+        // WHEN - it is saved
+        saveSettings(Map.of("opencodePassword", padded));
+
+        // THEN - it is stored exactly as typed, unlike every other text field of this card
+        assertThat(settingsRow().getAiOpencodePassword()).as("stored password with its spaces").isEqualTo(padded);
+    }
+
+    @Test
+    @DisplayName("should never render the stored password on the settings page")
+    void theSettingsPageNeverRendersTheStoredPassword() throws Exception {
+        // GIVEN - a stored password
+        saveSettings(Map.of("opencodeUsername", STORED_USERNAME, "opencodePassword", STORED_PASSWORD));
+
+        // WHEN - the settings page is opened
+        final String html = mockMvc.perform(get(SETTINGS_PATH).with(adminUser()))
+            .andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+
+        // THEN - the page says there is a password, and does not carry it
+        assertThat(html).as("state of the stored password on the page")
+            .contains("set (" + STORED_PASSWORD.length() + " characters)");
+        assertThat(html).as("stored password on the page").doesNotContain(STORED_PASSWORD);
+        assertThat(html).as("configured password on the page").doesNotContain(YAML_PASSWORD);
+        assertThat(html).as("the username is no secret").contains("value=\"" + STORED_USERNAME + "\"");
+    }
+
+    @Test
+    @DisplayName("should keep the password out of the properties and out of the snapshot text")
+    void neitherThePropertiesNorTheSnapshotPrintThePassword() throws Exception {
+        // GIVEN - a stored password on top of the configured one
+        saveSettings(Map.of("opencodePassword", STORED_PASSWORD));
+
+        // WHEN - the two objects that end up in log lines are printed
+        final String properties = aiProperties.toString();
+        final String snapshot = systemSettingsService.current().toString();
+
+        // THEN - neither carries a password, and both still carry what a log line is read for
+        assertThat(properties).as("configured password in the properties line").doesNotContain(YAML_PASSWORD);
+        assertThat(properties).as("the rest of the properties line").contains(CLOSED_PORT_URL);
+        assertThat(snapshot).as("stored password in the snapshot line").doesNotContain(STORED_PASSWORD);
+        assertThat(snapshot).as("state of the password in the snapshot line")
+            .contains("aiOpencodePassword=set (" + STORED_PASSWORD.length() + " chars)");
+    }
+
+    @Test
+    @DisplayName("should report a 401 from OpenCode as a wrong password and accept the right one")
+    void checkConnectionTellsAWrongPasswordFromARightOne() throws Exception {
+        // GIVEN - an OpenCode that demands a password, with the default user name
+        STUB.requirePassword(null, STORED_PASSWORD);
+
+        // WHEN - the check button is pressed with the wrong password in the box
+        final String wrong = mockMvc.perform(post(AI_CHECK_PATH).with(adminUser()).with(csrf())
+                .param("opencodeUrl", stubUrl())
+                .param("provider", CONFIGURED_PROVIDER)
+                .param("model", CONFIGURED_MODEL)
+                .param("opencodePassword", WRONG_PASSWORD))
+            .andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+
+        // THEN - the card says the credentials were rejected, in the failure colour
+        assertThat(wrong).as("verdict of a check with a wrong password").contains(UNAUTHORIZED_TEXT);
+        assertThat(wrong).as("colour of the rejected check").contains("border-error/60 text-error");
+
+        // WHEN - the check is repeated with the right password
+        final String right = mockMvc.perform(post(AI_CHECK_PATH).with(adminUser()).with(csrf())
+                .param("opencodeUrl", stubUrl())
+                .param("provider", CONFIGURED_PROVIDER)
+                .param("model", CONFIGURED_MODEL)
+                .param("opencodePassword", STORED_PASSWORD))
+            .andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+
+        // THEN - the check goes through and the label is the successful one
+        assertThat(right).as("verdict of a check with the right password")
+            .contains(CONFIGURED_PROVIDER + "/" + CONFIGURED_MODEL + "' found");
+        assertThat(right).as("colour of the successful check").contains("border-success/60 text-success");
+
+        // AND - the typed password is back in the box, with the warning that nothing is saved yet:
+        // the one answer of this surface that carries a password, so the button can be pressed twice
+        assertThat(right).as("typed password in the box after a check")
+            .contains("value=\"" + STORED_PASSWORD + "\"");
+        assertThat(right).as("warning under the result of a check").contains("Password is not saved yet");
+
+        // AND - a check is still not a save
+        assertThat(settingsRow().getAiOpencodePassword()).as("password in the row after two checks").isNull();
+    }
+
+    @Test
+    @DisplayName("should use the stored password for its own address and send it nowhere else")
+    void checkSendsTheStoredPasswordOnlyToTheAddressItBelongsTo() throws Exception {
+        // GIVEN - the stub address and its password in the settings row
+        STUB.requirePassword(null, STORED_PASSWORD);
+        saveSettings(Map.of("opencodeUrl", stubUrl(), "opencodePassword", STORED_PASSWORD));
+
+        // WHEN - the check button is pressed with both boxes left empty
+        final String own = mockMvc.perform(post(AI_CHECK_PATH).with(adminUser()).with(csrf())
+                .param("opencodeUrl", "")
+                .param("provider", CONFIGURED_PROVIDER)
+                .param("model", CONFIGURED_MODEL)
+                .param("opencodePassword", ""))
+            .andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+
+        // THEN - the stored password was used for the address it was stored with
+        assertThat(own).as("verdict of a check that fell back to the stored password")
+            .contains(CONFIGURED_PROVIDER + "/" + CONFIGURED_MODEL + "' found");
+        assertThat(STUB.authHeaders())
+            .as("credentials the stub received from the check of its own address")
+            .contains(basicHeader(null, STORED_PASSWORD));
+
+        // WHEN - the same empty box is checked against another address typed into the URL field
+        // (the very same server under another name, so the request is observable at all)
+        STUB.clear();
+        final String foreign = mockMvc.perform(post(AI_CHECK_PATH).with(adminUser()).with(csrf())
+                .param("opencodeUrl", "http://localhost:" + STUB.port())
+                .param("provider", CONFIGURED_PROVIDER)
+                .param("model", CONFIGURED_MODEL)
+                .param("opencodePassword", ""))
+            .andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+
+        // THEN - nothing was sent: the stored password does not travel to an address nobody stored
+        assertThat(STUB.authHeaders())
+            .as("credentials the stub received from a check of an address that is not the stored one")
+            .containsExactly("none");
+        assertThat(foreign).as("verdict of a check without credentials").contains(UNAUTHORIZED_TEXT);
+    }
+
     //// PRIVATE ////
 
     /** What the stub was sent, parsed: a contains() over the raw JSON would pass on the wrong field. */
@@ -526,6 +738,13 @@ class AiSettingsIntegrationTest {
             parsed.add(objectMapper.readTree(body));
         }
         return parsed;
+    }
+
+    /** The header an {@code opencode serve} with a password expects; an empty user means 'opencode'. */
+    private static String basicHeader(String username, String password) {
+        final String user = username == null || username.isEmpty() ? "opencode" : username;
+        return "Basic " + Base64.getEncoder()
+            .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
     private static String stubUrl() {

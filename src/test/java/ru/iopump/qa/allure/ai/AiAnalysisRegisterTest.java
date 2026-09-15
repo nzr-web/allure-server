@@ -117,6 +117,7 @@ class AiAnalysisRegisterTest {
 
     /** Defaults everywhere except the cache directory: {@code auto} stays off, so nothing is queued. */
     private static AiProperties properties(Path cacheDir) {
-        return new AiProperties(null, null, null, null, null, null, null, null, cacheDir.toString(), null);
+        return new AiProperties(null, null, null, null, null, null, null, null, cacheDir.toString(), null,
+            null, null);
     }
 }

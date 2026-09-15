@@ -67,3 +67,8 @@ ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_auto boolean;
 -- no project-notes section is added to the cluster prompt.
 ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_system_prompt varchar(16000);
 ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_prompt_notes varchar(4000);
+-- The OpenCode HTTP Basic credentials of the analysis. The password is stored as plain text on
+-- purpose (see SystemSettingsEntity); NULL means "not set in the admin panel" and the pair then
+-- comes from allure-ai.opencode-username/-password, or from the JVM environment of the server.
+ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_opencode_username varchar(64);
+ALTER TABLE app_system_settings ADD COLUMN IF NOT EXISTS ai_opencode_password varchar(256);

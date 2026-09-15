@@ -114,6 +114,39 @@
                             </p>
                         </div>
 
+                        !{ var opencodeUsername = ai.opencodeUsername(); }
+                        <div class="space-y-1">
+                            <label for="ai-opencode-username" class="block text-sm font-medium text-text">OpenCode username</label>
+                            <input id="ai-opencode-username" type="text" name="opencodeUsername" class="form-field"
+                                   value="${opencodeUsername.override()}" placeholder="opencode" autocomplete="off">
+                            <p class="text-xs text-text-muted">
+                                In force: <span class="font-mono text-text">${opencodeUsername.effective()}</span>
+                                <span class="ml-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${opencodeUsername.fromSettings() ? "bg-primary/15 text-primary" : "bg-surface text-text-muted"}">${opencodeUsername.source()}</span>
+                            </p>
+                        </div>
+
+                        !{ var opencodePassword = ai.opencodePassword(); }
+                        <div class="space-y-1">
+                            <label for="ai-opencode-password" class="block text-sm font-medium text-text">OpenCode password</label>
+                            <input id="ai-opencode-password" type="password" name="opencodePassword" class="form-field"
+                                   value="${opencodePassword.override()}"
+                                   placeholder="${opencodePassword.set() ? "unchanged" : ""}" autocomplete="new-password">
+                            <p class="text-xs text-text-muted">
+                                In force: <span class="font-mono text-text">${opencodePassword.state()}</span>
+                                <span class="ml-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${opencodePassword.fromSettings() ? "bg-primary/15 text-primary" : "bg-surface text-text-muted"}">${opencodePassword.source()}</span>
+                            </p>
+                            <label class="flex items-center gap-2 text-xs text-text-muted">
+                                <input type="checkbox" name="clearOpencodePassword" value="true"
+                                       class="h-4 w-4 rounded border-border bg-surface text-primary focus:ring-primary">
+                                Clear stored password
+                            </label>
+                            <p class="text-xs text-text-muted">
+                                An empty box keeps the stored password: the page never shows it back. Leave both empty and the
+                                analysis sends no credentials, unless <code class="font-mono text-primary">OPENCODE_SERVER_PASSWORD</code>
+                                is set in the environment of this server.
+                            </p>
+                        </div>
+
                         !{ var provider = ai.provider(); }
                         <div class="space-y-1">
                             <label for="ai-provider" class="block text-sm font-medium text-text">Provider</label>
@@ -219,6 +252,9 @@
                                     <span class="font-mono text-text">${found.id()}</span> (${found.models()} models)
                                 @endfor
                             </p>
+                        @endif
+                        @if(!ai.opencodePassword().override().isEmpty())
+                            <p class="mt-1 text-xs text-text-muted">Password is not saved yet - press Save.</p>
                         @endif
                     </div>
                 @endif

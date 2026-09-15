@@ -103,4 +103,19 @@ public class SystemSettingsEntity {
     @ToString.Exclude
     @Column(name = "ai_prompt_notes", length = 4000)
     private String aiPromptNotes;
+
+    @Nullable
+    @Column(name = "ai_opencode_username", length = 64)
+    private String aiOpencodeUsername;
+
+    // The OpenCode password is stored as plain text, like the provider keys in the opencode.json on
+    // the other side of the connection: this column is only ever read by the analysis worker, and
+    // encrypting it would need a key that lives somewhere else than the database it protects.
+    // Encryption is a task of its own, to be done when security asks for it. Out of toString() for
+    // the same reason the prompts are: the whole snapshot goes into the startup log.
+
+    @Nullable
+    @ToString.Exclude
+    @Column(name = "ai_opencode_password", length = 256)
+    private String aiOpencodePassword;
 }

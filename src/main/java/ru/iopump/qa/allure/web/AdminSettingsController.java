@@ -26,6 +26,7 @@ import ru.iopump.qa.allure.web.dto.AiSettingsView;
 import ru.iopump.qa.allure.web.dto.SystemSettingsView;
 import ru.vtb.at.allureai.llm.PromptBuilder;
 
+import java.beans.PropertyEditorSupport;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -61,6 +62,18 @@ public class AdminSettingsController {
     @InitBinder
     void trimEmptyStringsToNull(WebDataBinder binder) {
         binder.registerCustomEditor(String.class, new StringTrimmerEditor(true));
+        // The password is the one field that must not be trimmed: a space at either end is part of
+        // it. An empty box still binds to null, which here means "keep the stored password".
+        binder.registerCustomEditor(String.class, "opencodePassword", new EmptyToNullEditor());
+    }
+
+    /** Turns an empty text into {@code null} and leaves everything else exactly as it was typed. */
+    private static final class EmptyToNullEditor extends PropertyEditorSupport {
+
+        @Override
+        public void setAsText(String text) {
+            setValue(text == null || text.isEmpty() ? null : text);
+        }
     }
 
     /**
@@ -118,9 +131,14 @@ public class AdminSettingsController {
         final String url = form.opencodeUrl() == null ? effective.opencodeUrl().value() : form.opencodeUrl();
         final String provider = form.provider() == null ? effective.provider().value() : form.provider();
         final String modelId = form.model() == null ? effective.model().value() : form.model();
+        final String username = form.opencodeUsername() == null
+            ? effective.opencodeUsername().value()
+            : form.opencodeUsername();
+        final String password = passwordForCheck(form, effective, url);
         model.addAttribute("settings", SystemSettingsView.from(systemSettingsService.current()));
         model.addAttribute("ai", AiSettingsView.from(form, effective));
-        model.addAttribute("aiCheck", AiCheckView.from(aiConnectionCheckService.check(url, provider, modelId)));
+        model.addAttribute("aiCheck",
+            AiCheckView.from(aiConnectionCheckService.check(url, provider, modelId, username, password)));
         model.addAttribute("title", "System Settings");
         model.addAttribute("activeNav", "admin-settings");
         return VIEW_INDEX;
@@ -136,6 +154,22 @@ public class AdminSettingsController {
             : "API authentication is now OPTIONAL. Anonymous /api/** requests are accepted as guest.";
         flash.addFlashAttribute(FLASH_KEY, toastMap("success", message));
         return REDIRECT_INDEX;
+    }
+
+    /**
+     * Which password the check sends. A typed one is used as typed; an empty box falls back to the
+     * password in force, but only when the check goes to the address that password belongs to - a
+     * stored password must not travel to whatever host an admin types into the URL field. The
+     * clearing checkbox wins over both, so a check shows what the card will do once it is saved.
+     */
+    private static String passwordForCheck(AiSettingsForm form, AiSettingsService.Effective effective, String url) {
+        if (Boolean.TRUE.equals(form.clearOpencodePassword())) {
+            return null;
+        }
+        if (form.opencodePassword() != null) {
+            return form.opencodePassword();
+        }
+        return url.equals(effective.opencodeUrl().value()) ? effective.opencodePassword().value() : null;
     }
 
     private static Map<String, String> toastMap(String level, String message) {

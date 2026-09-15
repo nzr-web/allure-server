@@ -19,7 +19,9 @@ public record AiSettingsView(Item enabled,
                              Item timeoutSeconds,
                              Item auto,
                              Text systemPrompt,
-                             Text promptNotes) {
+                             Text promptNotes,
+                             Item opencodeUsername,
+                             Secret opencodePassword) {
 
     public static AiSettingsView from(AiSettingsForm form, AiSettingsService.Effective effective) {
         return new AiSettingsView(
@@ -32,8 +34,22 @@ public record AiSettingsView(Item enabled,
             Item.of(form.timeoutSeconds(), effective.timeoutSeconds()),
             Item.of(form.auto(), effective.auto()),
             Text.of(form.systemPrompt(), effective.systemPrompt()),
-            Text.of(form.promptNotes(), effective.promptNotes())
+            Text.of(form.promptNotes(), effective.promptNotes()),
+            Item.of(form.opencodeUsername(), usernameInForce(effective.opencodeUsername())),
+            Secret.of(form.opencodePassword(), effective.opencodePassword())
         );
+    }
+
+    /**
+     * The user in force, with the core's own default in place of an unset one: nobody configures a
+     * user without a password, and "null" in the line under the box would say less than the name
+     * {@code opencode serve} really expects.
+     */
+    private static AiSettingsService.Value<String> usernameInForce(AiSettingsService.Value<String> username) {
+        final String value = username.value();
+        return value == null || value.isEmpty()
+            ? new AiSettingsService.Value<>("opencode", username.source())
+            : username;
     }
 
     /**
@@ -76,6 +92,32 @@ public record AiSettingsView(Item enabled,
                 inForce == null ? "none" : inForce.length() + " characters",
                 effective.source().name().replace('_', '-'),
                 effective.fromSettings()
+            );
+        }
+    }
+
+    /**
+     * The OpenCode password. Never the value in force - only whether there is one and how long it
+     * is; {@link #override} is empty on every GET of the card and carries what was just typed only
+     * in the answer to a connection check, where the box has to keep what the check used.
+     *
+     * @param override     what to put into the password box, empty string on a GET of the card
+     * @param state        {@code set (N chars)} or {@code not set}, for the line under the box
+     * @param source       {@code SETTINGS} or {@code CONFIGURATION}, shown as the origin badge
+     * @param fromSettings whether the password in force is the stored one (drives the badge colour)
+     * @param set          whether a password is in force at all, for the placeholder of the box
+     */
+    public record Secret(String override, String state, String source, boolean fromSettings, boolean set) {
+
+        static Secret of(String override, AiSettingsService.Value<String> effective) {
+            final String inForce = effective.value();
+            final boolean set = inForce != null && !inForce.isEmpty();
+            return new Secret(
+                override == null ? "" : override,
+                set ? "set (" + inForce.length() + " characters)" : "not set",
+                effective.source().name(),
+                effective.fromSettings(),
+                set
             );
         }
     }

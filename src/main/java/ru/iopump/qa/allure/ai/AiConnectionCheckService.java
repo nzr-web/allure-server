@@ -13,8 +13,10 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -25,8 +27,9 @@ import java.util.Map;
  * <p>
  * Only {@code GET /config/providers} is called - the same endpoint the allure-ai core probes before
  * a run - so the check starts no session and costs the model nothing. Nothing is written anywhere:
- * the values come from the submitted form, not from the database, so an admin can try an address
- * out before saving it.
+ * the values come from the submitted form, so an admin can try an address out before saving it. The
+ * only value the caller may take from the database is the password, and only for the address it was
+ * stored with - see {@code AdminSettingsController}.
  * <p>
  * Both timeouts are short on purpose: this runs inside a browser request, and a wrong address must
  * come back as a red label in seconds rather than hold the page.
@@ -43,22 +46,44 @@ public class AiConnectionCheckService {
 
     private static final String PROVIDERS_PATH = "/config/providers";
 
+    /** What {@code opencode serve} answers when it is started with a password and gets none. */
+    private static final int UNAUTHORIZED = 401;
+
+    /** The message of a 401, the server-side twin of the one the allure-ai core logs for a job. */
+    static final String UNAUTHORIZED_MESSAGE =
+        "OpenCode rejected the credentials (401): the server password is missing or wrong";
+
+    /** The user {@code opencode serve} assumes when only a password is configured. */
+    private static final String DEFAULT_USERNAME = "opencode";
+
     private final ObjectMapper objectMapper;
+
+    /** Same check without credentials, for a server that asks for none. */
+    public CheckResult check(String opencodeUrl, String provider, String model) {
+        return check(opencodeUrl, provider, model, null, null);
+    }
 
     /**
      * @param opencodeUrl base url of {@code opencode serve}, as typed in the form
      * @param provider    provider id to look for, may be {@code null}
      * @param model       model id to look for inside that provider, may be {@code null}
+     * @param username    HTTP Basic user, {@code null} or empty means {@code opencode}
+     * @param password    HTTP Basic password; without one the request carries no {@code Authorization}
      */
-    public CheckResult check(String opencodeUrl, String provider, String model) {
+    public CheckResult check(String opencodeUrl, String provider, String model, String username, String password) {
         final URI uri = providersUri(opencodeUrl);
         if (uri == null) {
             return failure("Not a valid URL: '" + opencodeUrl + "'");
         }
 
         try (HttpClient client = newClient()) {
-            final HttpRequest request = providersRequest(uri);
+            final HttpRequest request = providersRequest(uri, basicAuthHeader(username, password));
             final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == UNAUTHORIZED) {
+                // The one answer that is about the card and not about the network: the admin can fix
+                // it in the field right above the button.
+                return failure(UNAUTHORIZED_MESSAGE);
+            }
             if (response.statusCode() != 200) {
                 return failure("OpenCode answered " + response.statusCode() + " to GET " + uri);
             }
@@ -141,7 +166,30 @@ public class AiConnectionCheckService {
 
     /** The one request the check makes, with the timeout of the whole exchange on it. */
     static HttpRequest providersRequest(URI uri) {
-        return HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT).GET().build();
+        return providersRequest(uri, null);
+    }
+
+    /** The same request, with the {@code Authorization} header when there is a password to send. */
+    static HttpRequest providersRequest(URI uri, @Nullable String authHeader) {
+        final HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT).GET();
+        if (authHeader != null) {
+            builder.header("Authorization", authHeader);
+        }
+        return builder.build();
+    }
+
+    /**
+     * {@code Basic ...} for the pair, or {@code null} when there is no password - the same rule the
+     * allure-ai core follows, so what the button checks is what a job will send.
+     */
+    @Nullable
+    static String basicAuthHeader(String username, String password) {
+        if (password == null || password.isEmpty()) {
+            return null;
+        }
+        final String user = username == null || username.isEmpty() ? DEFAULT_USERNAME : username;
+        return "Basic " + Base64.getEncoder()
+            .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
     private static String trimTrailingSlash(String url) {

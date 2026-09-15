@@ -355,9 +355,9 @@ starts by itself once step 1 has committed, so a CI pipeline only adds the one J
 
 #### Runtime settings
 
-Eight of the `allure-ai.*` settings can be changed while the server runs, in **Admin -> Settings**,
-card *AI analysis*: `enabled`, `opencodeUrl`, `provider`, `model`, `agent`, `parallel` (1-8),
-`timeoutSeconds` (30-3600) and `auto`. Two more live in that card only, because the analysis core
+Ten of the `allure-ai.*` settings can be changed while the server runs, in **Admin -> Settings**,
+card *AI analysis*: `enabled`, `opencodeUrl`, `opencodeUsername`, `opencodePassword`, `provider`,
+`model`, `agent`, `parallel` (1-8), `timeoutSeconds` (30-3600) and `auto`. Two more live in that card only, because the analysis core
 carries them itself and no `allure-ai.*` property exists for either: the *system prompt* and the
 *project notes*. `cache-dir` and `sweep-cron` are configuration only - moving the copies or
 rescheduling a cron while a job is running is not a settings change.
@@ -365,7 +365,7 @@ rescheduling a cron while a job is running is not a settings change.
 - A field left **empty** (or `Default (configuration)` in a list) means "no override": the value
   from the configuration stays in force. The badge next to every field says which of the two is in
   force right now, `SETTINGS`, `CONFIGURATION` or `BUILT-IN` for a prompt nobody has overridden.
-  *Reset to configuration* clears all ten at once.
+  *Reset to configuration* clears all twelve at once, the stored password included.
 - The settings row wins over the configuration, `enabled` included: the panel can switch the
   analysis on when the configuration has it off, and off when it has it on. While it is off,
   `POST /api/report/{uuid}/ai` answers `409` and the analysis button disappears from the reports
@@ -378,9 +378,20 @@ rescheduling a cron while a job is running is not a settings change.
 - *Project notes* (up to 4000 characters) are safer and enough for most cases: they are added to every
   cluster prompt as a section of its own, for what the model cannot know from the results ("a 502 from
   the gateway on the ift-2 stand is infrastructure"). The facts of a cluster prompt are not editable.
+- *OpenCode password* is the HTTP Basic password of `opencode serve` itself (the one it is started
+  with as `OPENCODE_SERVER_PASSWORD`), not a model credential. The card never shows it back, so an
+  **empty** password box means "keep the stored one"; *Clear stored password* is what removes it,
+  and it wins over anything typed into the box. With no password stored and none configured, the
+  analysis falls back to `OPENCODE_SERVER_PASSWORD` in the environment of this server, and then to
+  sending no credentials at all. The password is stored in the settings row as plain text, like the
+  provider keys in the `opencode.json` on the other side of the connection; it is kept out of every
+  log line, and `GET` of the settings page does not contain it.
 - *Check connection* calls `GET <opencodeUrl>/config/providers` with the values currently in the
   form (5 s to connect, 5 s to answer) and lists the providers it got back, saying whether the
-  provider/model pair is among them. Nothing is saved by a check.
+  provider/model pair is among them. A `401` is reported as such: the server asks for a password
+  the card does not have. The stored password is used only when the check goes to the address it
+  was stored with, and after a check the password box keeps what was typed - it is the one moment
+  the page carries it, and nothing has been saved yet. Nothing is saved by a check.
 - The settings are read at three moments: when a generation asks whether the analysis is on, when a
   job is registered (`auto`), and once at the start of a worker run. A job already running keeps
   the settings it started with; the next one picks up the new ones without a restart.
@@ -689,6 +700,8 @@ All of these except `cache-dir` and `sweep-cron` can be overridden at runtime in
 |---|---|---|---|---|
 | `allure-ai.enabled` | `ALLURE_AI_ENABLED` | boolean | `true` | Master switch. When `false`, `aiAnalysis: true` is ignored and the generation is the ordinary one |
 | `allure-ai.opencode-url` | `ALLURE_AI_OPENCODE_URL` | string | `http://127.0.0.1:4096` | Base URL of the `opencode serve` instance reachable from the server |
+| `allure-ai.opencode-username` | `ALLURE_AI_OPENCODE_USERNAME` | string | none | HTTP Basic user of `opencode serve`. Empty means `opencode`, the name it assumes itself |
+| `allure-ai.opencode-password` | `ALLURE_AI_OPENCODE_PASSWORD` | string | none | HTTP Basic password of `opencode serve`. Empty falls back to `OPENCODE_SERVER_PASSWORD` in the environment of this server, and then to no credentials at all. Kept out of the startup log |
 | `allure-ai.provider` | `ALLURE_AI_PROVIDER` | string | `litellm` | OpenCode provider id |
 | `allure-ai.model` | `ALLURE_AI_MODEL` | string | `qwen3.8` | Model id inside the provider |
 | `allure-ai.agent` | `ALLURE_AI_AGENT` | string | `allure-ai` | OpenCode agent. It must be declared without tools |

@@ -69,6 +69,7 @@ class AdminSettingsControllerTest {
     private static final String LEVEL_SUCCESS = "success";
     private static final String ADMIN_USERNAME = "admin";
     private static final String SAVED_PROMPT = "You are a test. Answer with one JSON object.";
+    private static final String SAVED_PASSWORD = "7f3c9a21-secret";
 
     @Autowired
     private MockMvc mockMvc;
@@ -232,7 +233,7 @@ class AdminSettingsControllerTest {
         // THEN - the service is handed nulls for them, and a trimmed value for the url
         verify(systemSettingsService).updateAiSettings(
             eq(new AiSettingsForm(null, "http://127.0.0.1:4096", "lmstudio", null, null, null, null, null,
-                null, null)),
+                null, null, null, null, null)),
             eq(ADMIN_USERNAME));
     }
 
@@ -266,7 +267,7 @@ class AdminSettingsControllerTest {
         // GIVEN - a settings row where the system prompt is overridden
         when(systemSettingsService.current()).thenReturn(new SystemSettingsService.Snapshot(
             false, Instant.now(), ADMIN_USERNAME,
-            null, null, null, null, null, null, null, null, SAVED_PROMPT, null));
+            null, null, null, null, null, null, null, null, SAVED_PROMPT, null, null, null));
         when(aiSettingsService.effective()).thenReturn(effectiveWithSavedSystemPrompt());
 
         // WHEN - GET the settings page
@@ -284,6 +285,74 @@ class AdminSettingsControllerTest {
         assertThat(body).as("origin badge of an overridden prompt").contains(">SETTINGS<");
     }
 
+    @Test
+    @DisplayName("should bind the OpenCode credentials, keeping the spaces of the password, when POST /app/admin/settings/ai")
+    void updateAiSettings_bindsTheOpenCodeCredentials() throws Exception {
+        // GIVEN - a password with a space at either end and the clearing checkbox ticked, as a
+        // browser sends it: an unchecked box sends nothing at all, a checked one sends "on"
+        // WHEN - the card is saved
+        mockMvc.perform(post(AI_PATH)
+                .param("opencodeUsername", "  bot  ")
+                .param("opencodePassword", " pa ss ")
+                .param("clearOpencodePassword", "on"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(redirectedUrl(SETTINGS_PATH));
+
+        // THEN - the username is trimmed like every other field, the password is not touched at all,
+        // and the checkbox arrives as TRUE
+        verify(systemSettingsService).updateAiSettings(
+            eq(new AiSettingsForm(null, null, null, null, null, null, null, null, null, null,
+                "bot", " pa ss ", Boolean.TRUE)),
+            eq(ADMIN_USERNAME));
+    }
+
+    @Test
+    @DisplayName("should bind an empty password box to null so the stored password survives a save")
+    void updateAiSettings_bindsAnEmptyPasswordBoxToNull() throws Exception {
+        // GIVEN - the card as it is rendered: the password box is empty and the box is not ticked
+        // WHEN - the card is saved
+        mockMvc.perform(post(AI_PATH)
+                .param("provider", "lmstudio")
+                .param("opencodeUsername", "")
+                .param("opencodePassword", ""))
+            .andExpect(status().is3xxRedirection());
+
+        // THEN - both credentials arrive as null, and nothing asks for the password to be cleared
+        verify(systemSettingsService).updateAiSettings(
+            eq(new AiSettingsForm(null, null, "lmstudio", null, null, null, null, null, null, null,
+                null, null, null)),
+            eq(ADMIN_USERNAME));
+    }
+
+    @Test
+    @DisplayName("should render the credential fields and the state of the password, never the password")
+    void index_rendersTheCredentialFieldsWithoutThePassword() throws Exception {
+        // GIVEN - a settings row where both OpenCode credentials are stored
+        when(systemSettingsService.current()).thenReturn(new SystemSettingsService.Snapshot(
+            false, Instant.now(), ADMIN_USERNAME,
+            null, null, null, null, null, null, null, null, null, null, "bot", SAVED_PASSWORD));
+        when(aiSettingsService.effective()).thenReturn(effectiveWithSavedPassword());
+
+        // WHEN - GET the settings page
+        MvcResult result = mockMvc.perform(get(SETTINGS_PATH))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        // THEN - both fields sit inside the form that saves the card, the password one masked
+        final String body = result.getResponse().getContentAsString();
+        assertThat(body).as("form posting to the save endpoint").contains("action=\"" + AI_PATH + "\"");
+        assertThat(body).as("username field").contains("name=\"opencodeUsername\"");
+        assertThat(body).as("masked password field").contains("type=\"password\" name=\"opencodePassword\"");
+        assertThat(body).as("checkbox that clears the stored password").contains("name=\"clearOpencodePassword\"");
+
+        // AND - the line under the box says there is a password and how long it is, and the box
+        // offers nothing to read: an empty value with a placeholder instead of the password
+        assertThat(body).as("state of the stored password")
+            .contains("set (" + SAVED_PASSWORD.length() + " characters)");
+        assertThat(body).as("placeholder of a password that is set").contains("placeholder=\"unchanged\"");
+        assertThat(body).as("the stored password must never reach the page").doesNotContain(SAVED_PASSWORD);
+    }
+
     ///// helpers /////
 
     /** Every setting in force from the configuration, i.e. nothing overridden in the admin panel. */
@@ -298,7 +367,9 @@ class AdminSettingsControllerTest {
             configured(300L),
             configured(false),
             builtIn(PromptBuilder.SYSTEM),
-            builtIn((String) null)
+            builtIn((String) null),
+            configured((String) null),
+            configured((String) null)
         );
     }
 
@@ -320,7 +391,28 @@ class AdminSettingsControllerTest {
             configured.timeoutSeconds(),
             configured.auto(),
             new AiSettingsService.Value<>(SAVED_PROMPT, AiSettingsService.Source.SETTINGS),
-            builtIn((String) null)
+            builtIn((String) null),
+            configured.opencodeUsername(),
+            configured.opencodePassword()
+        );
+    }
+
+    /** Everything from the configuration, except the OpenCode password, which the admin has saved. */
+    private static AiSettingsService.Effective effectiveWithSavedPassword() {
+        final AiSettingsService.Effective configured = configuredEffective();
+        return new AiSettingsService.Effective(
+            configured.enabled(),
+            configured.opencodeUrl(),
+            configured.provider(),
+            configured.model(),
+            configured.agent(),
+            configured.parallel(),
+            configured.timeoutSeconds(),
+            configured.auto(),
+            configured.systemPrompt(),
+            configured.promptNotes(),
+            new AiSettingsService.Value<>("bot", AiSettingsService.Source.SETTINGS),
+            new AiSettingsService.Value<>(SAVED_PASSWORD, AiSettingsService.Source.SETTINGS)
         );
     }
 

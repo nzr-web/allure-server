@@ -15,8 +15,10 @@ import static org.apache.commons.lang3.ObjectUtils.defaultIfNull;
  * Settings of the AI-analysis add-on, bound from {@code allure-ai.*} (relaxed binding applies, so
  * {@code ALLURE_AI_OPENCODE_URL} works as an environment variable).
  * <p>
- * No secret lives here: the credentials of the model gateway belong to the OpenCode instance this
- * server only knows the URL of, so the whole object is safe to log at startup.
+ * The credentials of the model gateway itself never live here: they belong to the OpenCode instance
+ * this server only knows the URL of. The one secret that does is {@code allure-ai.opencode-password},
+ * the HTTP Basic password of {@code opencode serve} - the password is excluded from {@code toString},
+ * so the whole object stays safe to log at startup.
  */
 @ConfigurationProperties(prefix = "allure-ai")
 @Getter
@@ -55,6 +57,18 @@ public class AiProperties {
     /** Cron of the housekeeping sweep for copies whose report is gone. Daily by default. */
     private final String sweepCron;
 
+    /** HTTP Basic user of {@code opencode serve}; {@code null} lets the core use its own default. */
+    @Nullable
+    private final String opencodeUsername;
+
+    /**
+     * HTTP Basic password of {@code opencode serve}; {@code null} or empty means the core falls back
+     * to {@code OPENCODE_SERVER_PASSWORD} of the JVM environment, and then to no header at all.
+     */
+    @Nullable
+    @ToString.Exclude
+    private final String opencodePassword;
+
     @ConstructorBinding
     public AiProperties(@Nullable Boolean enabled,
                         @Nullable String opencodeUrl,
@@ -65,7 +79,9 @@ public class AiProperties {
                         @Nullable Long timeoutSeconds,
                         @Nullable Boolean auto,
                         @Nullable String cacheDir,
-                        @Nullable String sweepCron) {
+                        @Nullable String sweepCron,
+                        @Nullable String opencodeUsername,
+                        @Nullable String opencodePassword) {
         this.enabled = defaultIfNull(enabled, true);
         this.opencodeUrl = defaultIfNull(opencodeUrl, "http://127.0.0.1:4096");
         this.provider = defaultIfNull(provider, "litellm");
@@ -76,6 +92,10 @@ public class AiProperties {
         this.auto = defaultIfNull(auto, false);
         this.cacheDir = defaultIfNull(cacheDir, "allure/allure-ai");
         this.sweepCron = defaultIfNull(sweepCron, "0 30 3 * * *");
+        // No default for the pair: an empty password is what tells the core to look at the
+        // environment of this JVM instead, and a default user would hide that decision.
+        this.opencodeUsername = opencodeUsername;
+        this.opencodePassword = opencodePassword;
     }
 
     @PostConstruct

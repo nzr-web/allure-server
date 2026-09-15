@@ -16,6 +16,12 @@ import ru.iopump.qa.allure.service.SystemSettingsService;
  * <p>
  * The boolean settings are rendered as a three-state {@code <select>} (default / on / off) for the
  * same reason: a checkbox has no way to say "not set".
+ * <p>
+ * The OpenCode password is the exception to all of it. The card never renders it back, so an empty
+ * password box cannot mean "clear": it means "keep what is stored". Clearing is what
+ * {@link #clearOpencodePassword} is for, and it wins over a typed value. Its editor is a
+ * {@code StringTrimmerEditor} that does NOT trim, because a leading or trailing space is part of a
+ * password, not decoration around it.
  *
  * @param enabled        master switch of the analysis
  * @param opencodeUrl    base url of a running {@code opencode serve}
@@ -26,7 +32,10 @@ import ru.iopump.qa.allure.service.SystemSettingsService;
  * @param timeoutSeconds timeout of a single model answer
  * @param auto           start the worker right after a report is generated with {@code aiAnalysis}
  * @param systemPrompt   instruction sent to the model instead of the one built into the allure-ai core
- * @param promptNotes    project-specific rules added to every cluster prompt as its own section
+ * @param promptNotes           project-specific rules added to every cluster prompt as its own section
+ * @param opencodeUsername      HTTP Basic user of {@code opencode serve}
+ * @param opencodePassword      HTTP Basic password of {@code opencode serve}; {@code null} keeps the stored one
+ * @param clearOpencodePassword {@code TRUE} removes the stored password, whatever the box says
  */
 public record AiSettingsForm(
     @Nullable Boolean enabled,
@@ -60,7 +69,17 @@ public record AiSettingsForm(
 
     @Nullable
     @Size(max = 4000, message = "must be at most 4000 characters")
-    String promptNotes
+    String promptNotes,
+
+    @Nullable
+    @Size(max = 64, message = "must be at most 64 characters")
+    String opencodeUsername,
+
+    @Nullable
+    @Size(max = 256, message = "must be at most 256 characters")
+    String opencodePassword,
+
+    @Nullable Boolean clearOpencodePassword
 ) {
 
     /**
@@ -70,9 +89,14 @@ public record AiSettingsForm(
     private static final String ID = "\\S{1,64}";
     private static final String ID_MESSAGE = "must be at most 64 characters without spaces";
 
-    /** An all-{@code null} form: every setting falls back to the configuration. */
+    /**
+     * A form that clears the card: every setting back to the configuration. All-{@code null} except
+     * the password checkbox - a {@code null} password means "keep the stored one", so a reset has to
+     * ask for the password to go explicitly.
+     */
     public static AiSettingsForm empty() {
-        return new AiSettingsForm(null, null, null, null, null, null, null, null, null, null);
+        return new AiSettingsForm(null, null, null, null, null, null, null, null, null, null,
+            null, null, Boolean.TRUE);
     }
 
     /** The overrides currently stored in the settings row, to pre-fill the card on a GET. */
@@ -87,7 +111,12 @@ public record AiSettingsForm(
             snapshot.aiTimeoutSeconds(),
             snapshot.aiAuto(),
             snapshot.aiSystemPrompt(),
-            snapshot.aiPromptNotes()
+            snapshot.aiPromptNotes(),
+            snapshot.aiOpencodeUsername(),
+            // The stored password is deliberately absent: the card must not render it back, and the
+            // GET that uses this form is exactly the page an over-the-shoulder reader sees.
+            null,
+            null
         );
     }
 }

@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -22,6 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * {@link Mode#ANSWERS} replies with a well-formed analysis for every cluster; {@link Mode#GARBAGE}
  * replies with prose the response parser cannot read, which is what an unusable model looks like
  * from the outside - including the single re-ask the core makes before giving up.
+ * <p>
+ * {@link #requirePassword(String, String)} makes it behave like an {@code opencode serve} started
+ * with {@code OPENCODE_SERVER_PASSWORD}: every endpoint answers {@code 401} unless the request
+ * carries HTTP Basic with exactly that pair.
  */
 final class OpenCodeStub implements AutoCloseable {
 
@@ -35,7 +40,10 @@ final class OpenCodeStub implements AutoCloseable {
     private final HttpServer server;
     private final AtomicInteger sessions = new AtomicInteger();
     private final List<String> messages = new CopyOnWriteArrayList<>();
+    private final List<String> authHeaders = new CopyOnWriteArrayList<>();
     private volatile Mode mode = Mode.ANSWERS;
+    /** The {@code Basic ...} header this stub accepts, or {@code null} while it asks for none. */
+    private volatile String expectedAuth;
 
     private OpenCodeStub(HttpServer server) {
         this.server = server;
@@ -45,8 +53,7 @@ final class OpenCodeStub implements AutoCloseable {
         try {
             final HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             final OpenCodeStub stub = new OpenCodeStub(server);
-            server.createContext("/config/providers",
-                exchange -> reply(exchange, "{\"providers\":[{\"id\":\"litellm\",\"models\":{\"qwen3.8\":{}}}]}"));
+            server.createContext("/config/providers", stub::providers);
             server.createContext("/session", stub::session);
             server.start();
             return stub;
@@ -63,6 +70,26 @@ final class OpenCodeStub implements AutoCloseable {
         this.mode = mode;
     }
 
+    /**
+     * Makes every endpoint demand HTTP Basic with this pair, as a password-protected
+     * {@code opencode serve} does. An empty username means the {@code opencode} default.
+     */
+    void requirePassword(String username, String password) {
+        final String user = username == null || username.isEmpty() ? "opencode" : username;
+        this.expectedAuth = "Basic " + Base64.getEncoder()
+            .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Back to a server that asks for nothing. */
+    void requireNoPassword() {
+        this.expectedAuth = null;
+    }
+
+    /** The {@code Authorization} headers the stub saw, {@code "none"} for a request without one. */
+    List<String> authHeaders() {
+        return List.copyOf(authHeaders);
+    }
+
     /** How many {@code POST /session} calls this stub has served - i.e. how often it was talked to. */
     int sessionsStarted() {
         return sessions.get();
@@ -76,9 +103,10 @@ final class OpenCodeStub implements AutoCloseable {
         return List.copyOf(messages);
     }
 
-    /** Forgets the recorded messages - the stub is shared by every test of its class. */
+    /** Forgets what was recorded - the stub is shared by every test of its class. */
     void clear() {
         messages.clear();
+        authHeaders.clear();
     }
 
     @Override
@@ -86,7 +114,36 @@ final class OpenCodeStub implements AutoCloseable {
         server.stop(0);
     }
 
+    private void providers(HttpExchange exchange) throws IOException {
+        if (rejected(exchange)) {
+            return;
+        }
+        reply(exchange, "{\"providers\":[{\"id\":\"litellm\",\"models\":{\"qwen3.8\":{}}}]}");
+    }
+
+    /**
+     * Records the credentials of the request and answers {@code 401} when they are not the ones
+     * asked for; {@code true} means the exchange is already finished.
+     */
+    private boolean rejected(HttpExchange exchange) throws IOException {
+        final String header = exchange.getRequestHeaders().getFirst("Authorization");
+        authHeaders.add(header == null ? "none" : header);
+        final String expected = expectedAuth;
+        if (expected == null || expected.equals(header)) {
+            return false;
+        }
+        final byte[] body = "Unauthorized".getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(401, body.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(body);
+        }
+        return true;
+    }
+
     private void session(HttpExchange exchange) throws IOException {
+        if (rejected(exchange)) {
+            return;
+        }
         final String path = exchange.getRequestURI().getPath();
         final byte[] body = exchange.getRequestBody().readAllBytes();
         if ("/session".equals(path)) {

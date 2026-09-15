@@ -142,6 +142,11 @@ public class SystemSettingsService implements ApplicationRunner {
      * The row is loaded and mutated in place on purpose: rebuilding it through the builder would
      * silently reset {@code requireApiAuth} (and the audit columns) of the other card on this page.
      *
+     * The OpenCode password is the one field a {@code null} does NOT clear: the card never renders
+     * it back, so an empty password box means "leave the stored one alone" and the checkbox
+     * {@code clearOpencodePassword} is what removes it. The checkbox wins over a typed value, so a
+     * mis-click cannot save a password the admin meant to drop.
+     *
      * @param form          the admin form; a {@code null} component clears that single override
      * @param actorUsername who is changing the settings, for the audit line
      */
@@ -162,15 +167,18 @@ public class SystemSettingsService implements ApplicationRunner {
         entity.setAiAuto(form.auto());
         entity.setAiSystemPrompt(form.systemPrompt());
         entity.setAiPromptNotes(form.promptNotes());
+        entity.setAiOpencodeUsername(form.opencodeUsername());
+        entity.setAiOpencodePassword(newPassword(entity, form));
         final Snapshot snapshot = saveAndPublish(entity, actorUsername);
         log.info("AI settings updated by '{}': {}", actorUsername, changed);
         return snapshot;
     }
 
     /**
-     * Clears every AI override, so all ten settings fall back to what they are without the panel:
-     * the {@code allure-ai.*} configuration for the eight of them that have one, and the prompt
-     * built into the allure-ai core for the system prompt (with no project notes at all).
+     * Clears every AI override, so all twelve settings fall back to what they are without the panel:
+     * the {@code allure-ai.*} configuration for the ten of them that have one, and the prompt
+     * built into the allure-ai core for the system prompt (with no project notes at all). The
+     * password goes too: {@link AiSettingsForm#empty()} carries the clearing checkbox for it.
      */
     @Transactional
     public Snapshot resetAiSettings(String actorUsername) {
@@ -207,6 +215,8 @@ public class SystemSettingsService implements ApplicationRunner {
         appendIfChanged(changed, "auto", entity.getAiAuto(), form.auto());
         appendTextIfChanged(changed, "systemPrompt", entity.getAiSystemPrompt(), form.systemPrompt());
         appendTextIfChanged(changed, "promptNotes", entity.getAiPromptNotes(), form.promptNotes());
+        appendIfChanged(changed, "opencodeUsername", entity.getAiOpencodeUsername(), form.opencodeUsername());
+        appendPasswordIfChanged(changed, entity.getAiOpencodePassword(), newPassword(entity, form));
         return changed.length() == 0 ? "nothing changed" : changed.toString();
     }
 
@@ -238,6 +248,34 @@ public class SystemSettingsService implements ApplicationRunner {
     }
 
     /**
+     * The password the form leaves in the row: the checkbox clears it, a filled box replaces it, and
+     * an empty box with the checkbox unticked keeps whatever is stored. Used by both the write and
+     * the audit line, so the log can never claim a change the row did not get.
+     */
+    private static String newPassword(SystemSettingsEntity entity, AiSettingsForm form) {
+        if (Boolean.TRUE.equals(form.clearOpencodePassword())) {
+            return null;
+        }
+        return form.opencodePassword() == null ? entity.getAiOpencodePassword() : form.opencodePassword();
+    }
+
+    /**
+     * Same as {@link #appendIfChanged}, for the OpenCode password: the audit line says that a
+     * password was set and how long it is, never what it is. An unchanged password is not mentioned
+     * at all - an empty password box is the normal way to save the rest of the card.
+     */
+    private static void appendPasswordIfChanged(StringBuilder changed, String before, String after) {
+        if (Objects.equals(before, after)) {
+            return;
+        }
+        if (changed.length() > 0) {
+            changed.append(", ");
+        }
+        changed.append("opencodePassword=")
+            .append(after == null ? "cleared" : "set (" + after.length() + " chars)");
+    }
+
+    /**
      * Immutable view of the settings row. The {@code ai*} components are nullable and {@code null}
      * means "not overridden in the admin panel": {@code AiSettingsService} then takes the value
      * from the {@code allure-ai.*} configuration.
@@ -254,19 +292,22 @@ public class SystemSettingsService implements ApplicationRunner {
                            Long aiTimeoutSeconds,
                            Boolean aiAuto,
                            String aiSystemPrompt,
-                           String aiPromptNotes) {
+                           String aiPromptNotes,
+                           String aiOpencodeUsername,
+                           String aiOpencodePassword) {
 
         /** A snapshot with no AI override at all - used for the pre-startup fallback. */
         public Snapshot(boolean requireApiAuth, Instant updatedAt, String updatedByUsername) {
             this(requireApiAuth, updatedAt, updatedByUsername, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null, null);
         }
 
         static Snapshot of(SystemSettingsEntity entity) {
             return new Snapshot(entity.isRequireApiAuth(), entity.getUpdatedAt(), entity.getUpdatedByUsername(),
                 entity.getAiEnabled(), entity.getAiOpencodeUrl(), entity.getAiProvider(), entity.getAiModel(),
                 entity.getAiAgent(), entity.getAiParallel(), entity.getAiTimeoutSeconds(), entity.getAiAuto(),
-                entity.getAiSystemPrompt(), entity.getAiPromptNotes());
+                entity.getAiSystemPrompt(), entity.getAiPromptNotes(),
+                entity.getAiOpencodeUsername(), entity.getAiOpencodePassword());
         }
 
         /**
@@ -288,11 +329,18 @@ public class SystemSettingsService implements ApplicationRunner {
                 + ", aiAuto=" + aiAuto
                 + ", aiSystemPrompt=" + length(aiSystemPrompt)
                 + ", aiPromptNotes=" + length(aiPromptNotes)
+                + ", aiOpencodeUsername=" + aiOpencodeUsername
+                + ", aiOpencodePassword=" + secret(aiOpencodePassword)
                 + ']';
         }
 
         private static String length(String text) {
             return text == null ? "null" : text.length() + " chars";
+        }
+
+        /** The stored password as a log line may name it: that there is one, and how long it is. */
+        private static String secret(String password) {
+            return password == null ? "null" : "set (" + password.length() + " chars)";
         }
     }
 }

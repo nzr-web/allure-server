@@ -151,7 +151,7 @@ class AiAnalysisAutoTest {
 
     /** Every setting at its configured value except {@code auto}, which is switched off by hand. */
     private static AiSettingsForm autoOff() {
-        return new AiSettingsForm(null, null, null, null, null, null, null, false, null, null);
+        return new AiSettingsForm(null, null, null, null, null, null, null, false, null, null, null, null, null);
     }
 
     private AiJobStatus awaitFinished(String uuid) throws InterruptedException {

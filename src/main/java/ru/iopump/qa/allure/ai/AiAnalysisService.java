@@ -386,6 +386,8 @@ public class AiAnalysisService {
             .timeoutSeconds(effective.timeoutSeconds().value())
             .systemPrompt(effective.systemPrompt().value())
             .promptNotes(effective.promptNotes().value())
+            .opencodeUsername(effective.opencodeUsername().value())
+            .opencodePassword(effective.opencodePassword().value())
             .out(logStream());
         final String previousUuid = job.getPreviousUuid();
         if (previousUuid != null && Files.isDirectory(resultsOf(previousUuid))) {
