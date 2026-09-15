@@ -12,6 +12,8 @@ WORKDIR /src
 # Gradle wrapper + build files first for better layer caching.
 COPY gradle/ gradle/
 COPY gradlew build.gradle settings.gradle gradle.properties ./
+# allure-ai core is a local jar (gradle/dependencies.gradle: files('libs/allure-ai-core.jar')).
+COPY libs/ libs/
 
 # Sources last — source changes should not bust the Gradle dependency cache.
 COPY src/ src/
