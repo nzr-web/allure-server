@@ -1,7 +1,6 @@
 package ru.iopump.qa.allure.ai;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.qameta.allure.entity.ExecutorInfo;
 import jakarta.annotation.Nullable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -16,7 +15,6 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 import ru.iopump.qa.allure.entity.ReportEntity;
-import ru.iopump.qa.allure.helper.ExecutorCiPlugin;
 import ru.iopump.qa.allure.repo.JpaReportRepository;
 import ru.iopump.qa.allure.service.JpaReportService;
 import ru.vtb.at.allureai.EnrichOutcome;
@@ -52,7 +50,7 @@ import java.util.stream.Stream;
  *       Whatever it writes is picked up by the very generation that follows.</li>
  *   <li>{@link #enqueue(String, String)} hands the report over to a single-threaded worker that runs
  *       the core <em>with</em> the model over the copy kept in {@link AiProperties#cacheDir()} and
- *       then asks {@link JpaReportService} for a fresh version of the same report path.</li>
+ *       then asks {@link JpaReportService} to rebuild the same report in place.</li>
  * </ol>
  * The copy is what makes the second phase possible at all: the generation request usually asks for
  * the results to be deleted, and the worker starts long after they would be gone.
@@ -67,6 +65,17 @@ public class AiAnalysisService {
 
     private static final String RESULTS = "results";
     private static final String JOB_FILE = "ai-job.json";
+    /**
+     * History the report was first generated with, laid out as the generator reads it
+     * ({@code history-in/history/history.json}, ...). The in-place rebuild needs it: by then the
+     * report's own {@code history/} already contains this very night.
+     */
+    private static final String HISTORY_IN = "history-in";
+    private static final String HISTORY = "history";
+    /** Prefix of the directory {@link #prepare} keeps the history in until the report uuid exists. */
+    private static final String PREPARE_PREFIX = "prepare-";
+    /** Siblings {@link JpaReportService#regenerateInPlace} swaps a report through. */
+    private static final List<String> SWAP_SUFFIXES = List.of(".ai-old", ".ai-tmp");
 
     /**
      * A copy younger than this is kept even when no report row matches it. {@link #register} writes
@@ -143,6 +152,7 @@ public class AiAnalysisService {
     public Prepared prepare(Path resultDir, String reportPath) {
         sweep();
         final String previousUuid = findPrevious(reportPath).orElse(null);
+        final Path historyIn = keepHistory(reportPath);
         final EnrichRequest.Builder request = EnrichRequest.builder(resultDir)
             .llm(false)
             .quiet(true)
@@ -155,12 +165,49 @@ public class AiAnalysisService {
             final int clusters = outcome.getResult().getClusters().size();
             log.info("AI analysis prepared for '{}': {} cluster(s), previous report '{}'",
                 reportPath, clusters, previousUuid);
-            return new Prepared(previousUuid, clusters, null);
+            return new Prepared(previousUuid, clusters, null, historyIn);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return failedPreparation(previousUuid, e);
+            return failedPreparation(previousUuid, historyIn, e);
         } catch (IOException | RuntimeException e) {
-            return failedPreparation(previousUuid, e);
+            return failedPreparation(previousUuid, historyIn, e);
+        }
+    }
+
+    /**
+     * Copies - not moves - the history the coming generation is about to take from the newest report
+     * of the path. It has to happen here: the generation moves that {@code history/} away and hands
+     * the report it creates a history that already contains this night, which is useless as an input
+     * for the rebuild after the analysis. The newest report is chosen exactly as the generation
+     * chooses it, which is not the report {@link #findPrevious} returns for the diff.
+     *
+     * @return {@code <cache-dir>/prepare-<random>/history-in}, or {@code null} when the path has no
+     *         report, the report has no history, or the copy failed
+     */
+    @Nullable
+    private Path keepHistory(String reportPath) {
+        final Optional<ReportEntity> newest = repository.findByPathOrderByCreatedDateTimeDesc(reportPath).stream()
+            .findFirst();
+        if (newest.isEmpty()) {
+            return null;
+        }
+        final Path source = reportService.getObject().getReportsDir()
+            .resolve(newest.get().getUuid().toString())
+            .resolve(HISTORY);
+        if (!Files.isDirectory(source)) {
+            return null;
+        }
+        final Path historyIn = cacheDir().resolve(PREPARE_PREFIX + UUID.randomUUID()).resolve(HISTORY_IN);
+        try {
+            FileUtils.copyDirectory(source.toFile(), historyIn.resolve(HISTORY).toFile());
+            return historyIn;
+        } catch (IOException e) {
+            // The analysis does not need the history, only the rebuild after it does; losing it costs
+            // the trend of one report, failing here would cost the report.
+            log.warn("Unable to keep the history of '{}', the analysed report will start its trend anew: {}",
+                source, e.getMessage());
+            FileUtils.deleteQuietly(historyIn.getParent().toFile());
+            return null;
         }
     }
 
@@ -186,6 +233,7 @@ public class AiAnalysisService {
         } else {
             FileUtils.copyDirectory(resultDir.toFile(), target.toFile());
         }
+        keepHistoryUnder(uuid, prepared.historyIn());
 
         final AiJob job = new AiJob();
         // A failed preparation counted no clusters either, but that zero means "we do not know", not
@@ -211,10 +259,25 @@ public class AiAnalysisService {
         }
     }
 
+    /** Moves the history {@link #prepare} kept to {@code <cache-dir>/<uuid>/history-in}. */
+    private void keepHistoryUnder(String uuid, @Nullable Path historyIn) {
+        if (historyIn == null || !Files.isDirectory(historyIn)) {
+            return;
+        }
+        try {
+            moveDirectory(historyIn, historyInOf(uuid));
+        } catch (IOException e) {
+            log.warn("Unable to keep the history of report '{}', the analysed report will start its trend anew: {}",
+                uuid, e.getMessage());
+        } finally {
+            FileUtils.deleteQuietly(historyIn.getParent().toFile());
+        }
+    }
+
     /**
      * Unattended start of the worker. It must wait for the commit of the generation transaction:
      * {@link JpaReportService} is {@code @Transactional}, and the worker thread would not see the
-     * report entity - nor find it as the latest of its path - before that transaction commits.
+     * report entity before that transaction commits.
      */
     private void startAfterCommit(String uuid, String baseUrl) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -235,7 +298,7 @@ public class AiAnalysisService {
 
     /**
      * Accepts a report for analysis. Repeats are cheap on purpose: an already queued or running job
-     * is returned as is, a finished one is returned without creating yet another report, and only
+     * is returned as is, a finished one is returned without rebuilding the report again, and only
      * {@code pending}, {@code partial} and {@code error} actually start a run.
      *
      * @param baseUrl absolute base url of the calling request; the worker has no request to derive
@@ -321,14 +384,9 @@ public class AiAnalysisService {
                 finish(uuid, job, AiJobStatus.ERROR, "the model answered for none of the clusters");
                 return;
             }
-            if (!isLatestOfPath(uuid, job.getReportPath())) {
-                // Someone published a newer report for this path while the model was thinking. The
-                // enriched copy stays: it is the previous run for whatever comes next.
-                finish(uuid, job, AiJobStatus.DONE, "report not regenerated: a newer report exists for this path");
-                return;
-            }
-            job.setResultUuid(regenerate(uuid, job, results, withoutAnswer));
-            finish(uuid, job, AiJobStatus.DONE, null);
+            regenerate(uuid, job, results);
+            job.setResultUuid(uuid);
+            finish(uuid, job, withoutAnswer > 0 ? AiJobStatus.PARTIAL : AiJobStatus.DONE, null);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             finish(uuid, job, AiJobStatus.ERROR, String.valueOf(e));
@@ -339,39 +397,16 @@ public class AiAnalysisService {
     }
 
     /**
-     * Publishes a new version of the same report path from the analysed copy and moves the copy
-     * under the new uuid, so the next run finds it as its previous run and the button disappears
-     * from the old row.
-     *
-     * @return uuid of the report that now carries the analysis
+     * Rebuilds the same report from the analysed copy: same uuid, URL and place in the path, so the
+     * night is not published twice and the copy stays where the next run looks for its previous run.
+     * The history goes in as it was before this night, when {@link #prepare} managed to keep it.
      */
-    private String regenerate(String uuid, AiJob job, Path results, int withoutAnswer) throws IOException {
-        final ReportEntity created = reportService.getObject().generate(
-            job.getReportPath(),
-            List.of(results),
-            false,
-            executorInfo(results),
-            job.getBaseUrl(),
-            false
-        );
-        final String newUuid = created.getUuid().toString();
-        Files.createDirectories(cacheDir().resolve(newUuid));
-        moveDirectory(results, resultsOf(newUuid));
-
-        final AiJob published = new AiJob();
-        published.setStatus(withoutAnswer > 0 ? AiJobStatus.PARTIAL : AiJobStatus.DONE);
-        published.setReportPath(job.getReportPath());
-        published.setPreviousUuid(job.getPreviousUuid());
-        published.setBaseUrl(job.getBaseUrl());
-        published.setClusters(job.getClusters());
-        published.setAnswered(job.getAnswered());
-        published.setWithoutAnswer(withoutAnswer);
-        published.setCreatedAt(now());
-        published.setFinishedAt(now());
-        writeJob(newUuid, published);
-        log.info("AI analysis of report '{}' published as report '{}' ({} of {} cluster(s) answered)",
-            uuid, newUuid, published.getAnswered(), published.getClusters());
-        return newUuid;
+    private void regenerate(String uuid, AiJob job, Path results) throws IOException {
+        final Path historyIn = historyInOf(uuid);
+        final List<Path> resultDirs = Files.isDirectory(historyIn) ? List.of(results, historyIn) : List.of(results);
+        reportService.getObject().regenerateInPlace(UUID.fromString(uuid), resultDirs, job.getBaseUrl());
+        log.info("AI analysis of report '{}' published in place ({} of {} cluster(s) answered)",
+            uuid, job.getAnswered(), job.getClusters());
     }
 
     private EnrichRequest.Builder llmRequest(Path results, AiJob job, AiSettingsService.Effective effective) {
@@ -405,6 +440,11 @@ public class AiAnalysisService {
      * clean-up, single and bulk delete, history trimming on every generation), so the copies are
      * collected here instead of hooking into each of them. Copies younger than
      * {@link #MIN_AGE_BEFORE_SWEEP} are left alone whatever the database says.
+     * <p>
+     * The same age rule removes {@code prepare-*} directories: {@link #register} moves each one under
+     * its report, so one that outlived the hour belongs to a generation that failed after
+     * {@link #prepare}. And the {@code <uuid>.ai-old} / {@code <uuid>.ai-tmp} siblings an interrupted
+     * in-place rebuild leaves in the reports directory - a whole report each, hundreds of megabytes.
      */
     @Scheduled(cron = "${allure-ai.sweep-cron:0 30 3 * * *}")
     public void sweep() {
@@ -416,6 +456,59 @@ public class AiAnalysisService {
                 jobs.remove(uuid);
                 log.info("AI analysis copy '{}' removed: no such report anymore", uuid);
             }
+        }
+        for (Path dir : prepareDirs()) {
+            if (olderThanMinAge(dir)) {
+                FileUtils.deleteQuietly(dir.toFile());
+                log.info("AI analysis history '{}' removed: its generation never registered it", dir);
+            }
+        }
+        for (Path dir : swapLeftovers()) {
+            if (olderThanMinAge(dir)) {
+                FileUtils.deleteQuietly(dir.toFile());
+                log.info("Leftover '{}' of an interrupted in-place rebuild removed", dir);
+            }
+        }
+    }
+
+    /**
+     * {@code <uuid>.ai-old} and {@code <uuid>.ai-tmp} in the reports directory. Only these two
+     * suffixes after a uuid: everything else there belongs to the report server.
+     */
+    private List<Path> swapLeftovers() {
+        final Path dir = reportService.getObject().getReportsDir();
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> children = Files.list(dir)) {
+            return children.filter(Files::isDirectory)
+                .filter(path -> isSwapLeftover(path.getFileName().toString()))
+                .toList();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static boolean isSwapLeftover(String name) {
+        for (String suffix : SWAP_SUFFIXES) {
+            if (name.endsWith(suffix) && parseUuid(name.substring(0, name.length() - suffix.length())).isPresent()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Path> prepareDirs() {
+        final Path dir = cacheDir();
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> children = Files.list(dir)) {
+            return children.filter(Files::isDirectory)
+                .filter(path -> path.getFileName().toString().startsWith(PREPARE_PREFIX))
+                .toList();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -434,9 +527,9 @@ public class AiAnalysisService {
 
     //region Private
 
-    private Prepared failedPreparation(String previousUuid, Exception e) {
+    private Prepared failedPreparation(String previousUuid, @Nullable Path historyIn, Exception e) {
         log.error("AI analysis preparation failed, the report is generated without it", e);
-        return new Prepared(previousUuid, 0, String.valueOf(e));
+        return new Prepared(previousUuid, 0, String.valueOf(e), historyIn);
     }
 
     private void finish(String uuid, AiJob job, AiJobStatus status, String error) {
@@ -456,27 +549,6 @@ public class AiAnalysisService {
             .findFirst();
     }
 
-    private boolean isLatestOfPath(String uuid, String reportPath) {
-        return repository.findByPathOrderByCreatedDateTimeDesc(reportPath).stream()
-            .findFirst()
-            .map(entity -> uuid.equals(entity.getUuid().toString()))
-            .orElse(false);
-    }
-
-    @Nullable
-    private ExecutorInfo executorInfo(Path results) {
-        final Path file = results.resolve(ExecutorCiPlugin.JSON_FILE_NAME);
-        if (!Files.isRegularFile(file)) {
-            return null;
-        }
-        try {
-            return objectMapper.readValue(file.toFile(), ExecutorInfo.class);
-        } catch (IOException e) {
-            log.warn("Unable to read '{}': {}", file, e.getMessage());
-            return null;
-        }
-    }
-
     private static void moveDirectory(Path source, Path target) throws IOException {
         try {
             Files.move(source, target);
@@ -493,6 +565,10 @@ public class AiAnalysisService {
 
     private Path resultsOf(String uuid) {
         return cacheDir().resolve(uuid).resolve(RESULTS);
+    }
+
+    private Path historyInOf(String uuid) {
+        return cacheDir().resolve(uuid).resolve(HISTORY_IN);
     }
 
     private Path jobFile(String uuid) {
@@ -564,7 +640,17 @@ public class AiAnalysisService {
 
     //endregion
 
-    /** Outcome of the offline phase: what the worker will need and what went wrong, if anything. */
-    public record Prepared(@Nullable String previousUuid, int clusters, @Nullable String error) {
+    /**
+     * Outcome of the offline phase: what the worker will need and what went wrong, if anything.
+     *
+     * @param historyIn history kept for the rebuild after the analysis, {@code null} when there is none
+     */
+    public record Prepared(@Nullable String previousUuid, int clusters, @Nullable String error,
+                           @Nullable Path historyIn) {
+
+        /** Without a kept history: the first report of its path, or nothing to keep. */
+        public Prepared(@Nullable String previousUuid, int clusters, @Nullable String error) {
+            this(previousUuid, clusters, error, null);
+        }
     }
 }

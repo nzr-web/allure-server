@@ -56,7 +56,7 @@ class AiAnalysisAutoTest {
     private static final String REPORT_PATH_HEAD = "ai";
     private static final String REPORT_PATH_TAIL = "auto";
     private static final String REPORT_PATH_TAIL_OFF = "auto-off";
-    private static final int EXPECTED_REPORTS = 2;
+    private static final int EXPECTED_REPORTS = 1;
     private static final long AWAIT_TIMEOUT_MS = 60_000L;
 
     private static final OpenCodeStub STUB;
@@ -112,11 +112,11 @@ class AiAnalysisAutoTest {
             .andReturn().getResponse().getContentAsString();
         final String pendingUuid = objectMapper.readTree(response).path("uuid").asText();
 
-        // THEN - the worker ran on its own and published the analysed version of the report
+        // THEN - the worker ran on its own and rebuilt the same report with the analysis
         assertThat(awaitFinished(pendingUuid)).as("job status in auto mode").isEqualTo(AiJobStatus.DONE);
         assertThat(aiAnalysisService.status(pendingUuid).getResultUuid())
-            .as("report published by the unattended worker")
-            .isNotNull();
+            .as("report rebuilt by the unattended worker")
+            .isEqualTo(pendingUuid);
         assertThat(reportRepository.findByPath(REPORT_PATH_HEAD + "/" + REPORT_PATH_TAIL))
             .as("reports of this path after one generation in auto mode")
             .hasSize(EXPECTED_REPORTS);

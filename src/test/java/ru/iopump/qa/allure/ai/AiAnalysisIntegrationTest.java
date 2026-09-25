@@ -30,9 +30,11 @@ import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -42,14 +44,15 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 
 /**
  * End-to-end test of the AI analysis over the real generation pipeline: uploaded results are
- * clustered before the report is built, a copy is kept for the model, and the worker publishes a
- * new version of the report once the model has answered.
+ * clustered before the report is built, a copy is kept for the model, and the worker rebuilds the
+ * same report in place once the model has answered.
  * <p>
  * The model is the only thing stubbed ({@link OpenCodeStub} speaks the OpenCode protocol on
  * loopback); the Allure generator, the database and the filesystem layout are the real ones. The
  * report tab plugin is deliberately absent, so every assertion is made on artefacts that do not
- * need it: {@code ai-analysis.json}, {@code categories.json}, {@code environment.properties} and
- * the {@code data/categories.json} the Allure core itself produces.
+ * need it: {@code ai-analysis.json}, {@code categories.json}, {@code environment.properties},
+ * the {@code data/categories.json} the Allure core itself produces and the per-test sections the
+ * core writes into {@code data/test-cases/*.json}.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
@@ -85,6 +88,14 @@ class AiAnalysisIntegrationTest {
     private static final String AI_CATEGORY_PREFIX = "[AI] ";
     /** Escaped as a .properties key is: the report overview shows it as "AI Analysis". */
     private static final String AI_ENVIRONMENT_KEY = "AI\\ Analysis";
+    /**
+     * Heading of the per-test section as it reaches the report. The section's own
+     * {@code allure-ai:begin} marker is an HTML comment, which Allure drops from the description.
+     */
+    private static final String AI_SECTION_MARK = "<b>AI Analysis</b>";
+    private static final String SWAP_TMP_SUFFIX = ".ai-tmp";
+    private static final String SWAP_OLD_SUFFIX = ".ai-old";
+    private static final String HISTORY_IN = "history-in";
     private static final int EXPECTED_CLUSTERS = 2;
     private static final long AWAIT_TIMEOUT_MS = 120_000L;
     /** Past the hour a copy is protected for, so the sweep is allowed to take it. */
@@ -213,58 +224,166 @@ class AiAnalysisIntegrationTest {
     }
 
     @Test
-    @DisplayName("should publish a new version of the report when the model answers every cluster")
-    void publishesANewReportWhenTheModelAnswers() throws Exception {
-        // GIVEN - a pending report of its own path
+    @DisplayName("should rebuild the same report in place when the model answers every cluster")
+    void rebuildsTheSameReportInPlaceWhenTheModelAnswers() throws Exception {
+        // GIVEN - a pending report of its own path, built before the model has said anything
         final String path = "ai/publish";
         final String resultUuid = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", "beta");
         final String pendingUuid = generate(path, resultUuid, true, false, true);
+        final ReportEntity before = reportRepository.findOneByUuid(UUID.fromString(pendingUuid)).orElseThrow();
+        assertThat(testCases(pendingUuid))
+            .as("test cases of the pending report")
+            .contains(AI_SECTION_MARK)
+            .doesNotContain(stubAnswer());
 
         // WHEN - the model is asked to analyse it
         mockMvc.perform(post(API_REPORT + "/" + pendingUuid + "/ai")).andExpect(status().isAccepted());
         final AiJobStatus status = awaitFinished(pendingUuid);
 
-        // THEN - the job is done and points at the report that carries the analysis
+        // THEN - the job is done and points at its own report
         assertThat(status).as("job status after the model answered").isEqualTo(AiJobStatus.DONE);
-        final String publishedUuid = aiAnalysisService.status(pendingUuid).getResultUuid();
-        assertThat(publishedUuid).as("uuid of the published report").isNotNull();
+        assertThat(aiAnalysisService.status(pendingUuid).getResultUuid())
+            .as("report that carries the analysis")
+            .isEqualTo(pendingUuid);
 
-        // AND - it is a new version of the same path, one level above the pending one
-        final ReportEntity pending = reportRepository.findOneByUuid(UUID.fromString(pendingUuid)).orElseThrow();
-        final ReportEntity published = reportRepository.findOneByUuid(UUID.fromString(publishedUuid)).orElseThrow();
-        assertThat(published.getPath()).as("path of the published report").isEqualTo(path);
-        assertThat(published.getLevel()).as("level of the published report").isEqualTo(pending.getLevel() + 1);
+        // AND - still the only report of its path, with the same identity and a recounted size
+        assertThat(reportRepository.findByPath(path))
+            .as("reports of this path after the analysis")
+            .extracting(ReportEntity::getUuid)
+            .containsExactly(UUID.fromString(pendingUuid));
+        final ReportEntity after = reportRepository.findOneByUuid(UUID.fromString(pendingUuid)).orElseThrow();
+        assertThat(after.getLevel()).as("level of the rebuilt report").isEqualTo(before.getLevel());
+        assertThat(after.getUrl()).as("url of the rebuilt report").isEqualTo(before.getUrl());
+        assertThat(after.getCreatedDateTime()).as("creation time of the rebuilt report").isEqualTo(before.getCreatedDateTime());
+        assertThat(after.getSize())
+            .as("size of the rebuilt report")
+            .isEqualTo(ReportEntity.sizeKB(REPORTS_DIR.resolve(pendingUuid)))
+            .isNotEqualTo(before.getSize());
 
-        // AND - the analysed results moved under the new report and now carry the answers
-        assertThat(CACHE_DIR.resolve(pendingUuid).resolve("results"))
-            .as("results copy of the pending report after publication")
-            .doesNotExist();
-        assertThat(readJson(CACHE_DIR.resolve(publishedUuid).resolve("results").resolve(AI_SUMMARY))
+        // AND - the files under that uuid were rebuilt from the answered copy, and the swap left nothing behind
+        assertThat(testCases(pendingUuid))
+            .as("test cases of the rebuilt report")
+            .contains(AI_SECTION_MARK)
+            .contains(stubAnswer());
+        assertSwapLeftNothing(pendingUuid);
+
+        // AND - the copy and its job stay under the same uuid and now carry the answers
+        assertThat(readJson(CACHE_DIR.resolve(pendingUuid).resolve("results").resolve(AI_SUMMARY))
             .path("status").asText())
-            .as("analysis status in the published results")
+            .as("analysis status in the results copy")
             .isEqualTo("done");
+        assertThat(CACHE_DIR.resolve(pendingUuid).resolve("ai-job.json"))
+            .as("job file of the rebuilt report")
+            .isRegularFile();
     }
 
     @Test
     @DisplayName("should answer 200 and publish nothing when the analysis of a report is already done")
     void doesNotPublishASecondReportWhenTheAnalysisIsDone() throws Exception {
-        // GIVEN - a report whose analysis has already been published
+        // GIVEN - a report whose analysis has already been published in place
         final String path = "ai/repeat";
         final String resultUuid = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", "beta");
         final String pendingUuid = generate(path, resultUuid, true, false, true);
         mockMvc.perform(post(API_REPORT + "/" + pendingUuid + "/ai")).andExpect(status().isAccepted());
         assertThat(awaitFinished(pendingUuid)).as("first run of the model").isEqualTo(AiJobStatus.DONE);
-        final String publishedUuid = aiAnalysisService.status(pendingUuid).getResultUuid();
 
-        // WHEN - the published report is submitted for analysis again
-        mockMvc.perform(post(API_REPORT + "/" + publishedUuid + "/ai"))
+        // WHEN - the same report is submitted for analysis again
+        mockMvc.perform(post(API_REPORT + "/" + pendingUuid + "/ai"))
             // THEN - 200, not 202: there is nothing left to do
             .andExpect(status().isOk());
 
-        // AND - no third report appeared for this path
+        // AND - the path still has its one report
         assertThat(reportRepository.findByPath(path))
             .as("reports of this path after the repeated request")
+            .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("should keep one trend entry per night when the report of the second night is rebuilt after the analysis")
+    void keepsOneTrendEntryPerNightAfterTheRebuild() throws Exception {
+        // GIVEN - an ordinary first night of the path, then a second night generated with the analysis
+        final String path = "ai/trend";
+        final String firstResults = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", "beta");
+        generate(path, firstResults, true, false, false);
+        final String secondResults = AllureResultsFixture.write(RESULTS_DIR, 2, "alpha", "beta");
+        final String reportUuid = generate(path, secondResults, true, false, true);
+
+        // WHEN - the model analyses the second night
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai")).andExpect(status().isAccepted());
+        assertThat(awaitFinished(reportUuid)).as("job status after the model answered").isEqualTo(AiJobStatus.DONE);
+        assertThat(testCases(reportUuid))
+            .as("test cases of the rebuilt report: the rebuild did happen")
+            .contains(stubAnswer());
+
+        // THEN - two nights, two entries: the second night is not counted twice
+        assertThat(trend(reportUuid))
+            .as("history trend of the rebuilt second night")
             .hasSize(2);
+
+        // AND - the history the rebuild took is the one of the first night, kept next to the copy
+        assertThat(CACHE_DIR.resolve(reportUuid).resolve(HISTORY_IN).resolve("history").resolve("history-trend.json"))
+            .as("history kept for the rebuild, in the layout the generator reads")
+            .isRegularFile();
+        assertThat(prepareLeftovers())
+            .as("temporary history directories of the preparation")
+            .isEmpty();
+    }
+
+    @Test
+    @DisplayName("should rebuild the first report of a path without any kept history")
+    void rebuildsTheFirstReportOfAPathWithoutHistory() throws Exception {
+        // GIVEN - the very first night of a path, generated with the analysis
+        final String path = "ai/first-night";
+        final String resultUuid = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", "beta");
+        final String reportUuid = generate(path, resultUuid, true, false, true);
+        assertThat(CACHE_DIR.resolve(reportUuid).resolve(HISTORY_IN))
+            .as("kept history of the first report of a path")
+            .doesNotExist();
+
+        // WHEN - the model analyses it
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai")).andExpect(status().isAccepted());
+
+        // THEN - the rebuild goes through and the trend has this one night
+        assertThat(awaitFinished(reportUuid)).as("job status after the model answered").isEqualTo(AiJobStatus.DONE);
+        assertThat(testCases(reportUuid))
+            .as("test cases of the rebuilt report")
+            .contains(stubAnswer());
+        assertThat(trend(reportUuid))
+            .as("history trend of the first night after the rebuild")
+            .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("should finish the leftover clusters of a partial analysis in the same report on a repeated request")
+    void retriesAPartialAnalysisInPlace() throws Exception {
+        // GIVEN - a report whose analysis answered one cluster out of two
+        final String path = "ai/partial";
+        final String resultUuid = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", OpenCodeStub.PARTIAL_UNANSWERED);
+        final String reportUuid = generate(path, resultUuid, true, false, true);
+        STUB.mode(OpenCodeStub.Mode.PARTIAL);
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai")).andExpect(status().isAccepted());
+        assertThat(awaitFinished(reportUuid)).as("job status with one cluster unanswered").isEqualTo(AiJobStatus.PARTIAL);
+        assertThat(aiAnalysisService.status(reportUuid).getWithoutAnswer())
+            .as("clusters left without an answer")
+            .isEqualTo(1);
+        assertThat(aiAnalysisService.status(reportUuid).getResultUuid())
+            .as("report that carries the partial analysis")
+            .isEqualTo(reportUuid);
+
+        // WHEN - the model answers everything and the analysis is requested again
+        STUB.mode(OpenCodeStub.Mode.ANSWERS);
+        mockMvc.perform(post(API_REPORT + "/" + reportUuid + "/ai")).andExpect(status().isAccepted());
+
+        // THEN - done, in the same report, and still the only one of its path
+        assertThat(awaitFinished(reportUuid)).as("job status after the repeated request").isEqualTo(AiJobStatus.DONE);
+        assertThat(aiAnalysisService.status(reportUuid).getResultUuid())
+            .as("report that carries the finished analysis")
+            .isEqualTo(reportUuid);
+        assertThat(reportRepository.findByPath(path))
+            .as("reports of this path after two runs of the model")
+            .extracting(ReportEntity::getUuid)
+            .containsExactly(UUID.fromString(reportUuid));
+        assertSwapLeftNothing(reportUuid);
     }
 
     @Test
@@ -310,29 +429,6 @@ class AiAnalysisIntegrationTest {
     }
 
     @Test
-    @DisplayName("should not regenerate the report when a newer one already exists for the same path")
-    void doesNotRegenerateWhenANewerReportExists() throws Exception {
-        // GIVEN - a pending report that has since been superseded by a newer one of the same path
-        final String path = "ai/race";
-        final String firstResults = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha", "beta");
-        final String pendingUuid = generate(path, firstResults, true, false, true);
-        final String newerResults = AllureResultsFixture.write(RESULTS_DIR, 2, "alpha", "beta");
-        generate(path, newerResults, false, false, false);
-
-        // WHEN - the analysis of the superseded report finishes
-        mockMvc.perform(post(API_REPORT + "/" + pendingUuid + "/ai")).andExpect(status().isAccepted());
-
-        // THEN - the job is done but deliberately published nothing
-        assertThat(awaitFinished(pendingUuid)).as("job status of a superseded report").isEqualTo(AiJobStatus.DONE);
-        assertThat(aiAnalysisService.status(pendingUuid).getResultUuid())
-            .as("published report of a superseded analysis")
-            .isNull();
-        assertThat(reportRepository.findByPath(path))
-            .as("reports of this path after the analysis of the older one")
-            .hasSize(2);
-    }
-
-    @Test
     @DisplayName("should delete an old results copy whose report no longer exists when preparing the next analysis")
     void sweepsOldCopiesWithoutAReport() throws Exception {
         // GIVEN - a leftover copy of a report that is not in the database, older than any generation
@@ -361,6 +457,61 @@ class AiAnalysisIntegrationTest {
         assertThat(fresh.resolve("ai-job.json"))
             .as("job file of a copy younger than the sweep age")
             .isRegularFile();
+    }
+
+    @Test
+    @DisplayName("should delete old leftovers of an interrupted in-place rebuild and keep fresh ones and the reports")
+    void sweepsOldSwapLeftovers() throws Exception {
+        // GIVEN - '.ai-old' and '.ai-tmp' siblings past the sweep age, the same written moments ago,
+        // and an ordinary report directory as old as the stale ones
+        final String report = generate("ai/sweep-swap-report", AllureResultsFixture.write(RESULTS_DIR, 1, "alpha"),
+            true, false, false);
+        final Path reportDir = REPORTS_DIR.resolve(report);
+        Files.setLastModifiedTime(reportDir, FileTime.from(Instant.now().minus(OLDER_THAN_SWEEP_AGE)));
+        final Path oldAside = swapLeftover(SWAP_OLD_SUFFIX, OLDER_THAN_SWEEP_AGE);
+        final Path oldFresh = swapLeftover(SWAP_TMP_SUFFIX, OLDER_THAN_SWEEP_AGE);
+        final Path newAside = swapLeftover(SWAP_OLD_SUFFIX, Duration.ZERO);
+        final Path newFresh = swapLeftover(SWAP_TMP_SUFFIX, Duration.ZERO);
+        try {
+            // WHEN - any report is generated with the analysis
+            generate("ai/sweep-swap", AllureResultsFixture.write(RESULTS_DIR, 1, "alpha"), true, false, true);
+
+            // THEN - the stale leftovers are gone
+            assertThat(oldAside).as("'.ai-old' older than the sweep age").doesNotExist();
+            assertThat(oldFresh).as("'.ai-tmp' older than the sweep age").doesNotExist();
+
+            // AND - the fresh ones, possibly of a rebuild in flight, and the report itself stay
+            assertThat(newAside.resolve("index.html")).as("'.ai-old' younger than the sweep age").isRegularFile();
+            assertThat(newFresh.resolve("index.html")).as("'.ai-tmp' younger than the sweep age").isRegularFile();
+            assertThat(reportDir.resolve("index.html")).as("an ordinary report as old as the stale leftovers").isRegularFile();
+        } finally {
+            FileUtils.deleteQuietly(newAside.toFile());
+            FileUtils.deleteQuietly(newFresh.toFile());
+        }
+    }
+
+    @Test
+    @DisplayName("should delete an old prepare directory left by a failed generation and keep a fresh one")
+    void sweepsOldPrepareDirectories() throws Exception {
+        // GIVEN - the history a preparation kept for a generation that failed before registering it,
+        // one past the sweep age and one written moments ago by a generation still in flight
+        final Path old = prepareDirectory(OLDER_THAN_SWEEP_AGE);
+        final Path fresh = prepareDirectory(Duration.ZERO);
+        try {
+            // WHEN - any report is generated with the analysis
+            final String resultUuid = AllureResultsFixture.write(RESULTS_DIR, 1, "alpha");
+            generate("ai/sweep-prepare", resultUuid, true, false, true);
+
+            // THEN - the old one is gone, the fresh one is untouched
+            assertThat(old).as("prepare directory older than the sweep age").doesNotExist();
+            assertThat(fresh.resolve(HISTORY_IN).resolve("history").resolve("history.json"))
+                .as("history in a prepare directory younger than the sweep age")
+                .isRegularFile();
+        } finally {
+            // other tests of this class expect no prepare directory to be left in the cache
+            FileUtils.deleteQuietly(old.toFile());
+            FileUtils.deleteQuietly(fresh.toFile());
+        }
     }
 
     @Test
@@ -442,6 +593,25 @@ class AiAnalysisIntegrationTest {
         return orphan;
     }
 
+    /** A {@code <uuid><suffix>} directory in the reports directory, aged by touching it back in time. */
+    private static Path swapLeftover(String suffix, Duration age) throws IOException {
+        final Path dir = REPORTS_DIR.resolve(UUID.randomUUID() + suffix);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("index.html"), "<html></html>", StandardCharsets.UTF_8);
+        Files.setLastModifiedTime(dir, FileTime.from(Instant.now().minus(age)));
+        return dir;
+    }
+
+    /** A {@code prepare-*} directory with a kept history, aged by touching it back in time. */
+    private static Path prepareDirectory(Duration age) throws IOException {
+        final Path dir = CACHE_DIR.resolve("prepare-" + UUID.randomUUID());
+        final Path history = dir.resolve(HISTORY_IN).resolve("history");
+        Files.createDirectories(history);
+        Files.writeString(history.resolve("history.json"), "{}", StandardCharsets.UTF_8);
+        Files.setLastModifiedTime(dir, FileTime.from(Instant.now().minus(age)));
+        return dir;
+    }
+
     /** {@code POST /api/report}; returns the uuid of the created report. */
     private String generate(String path, String resultUuid, boolean deleteResults, boolean singleFile,
                             boolean aiAnalysis) throws Exception {
@@ -454,6 +624,43 @@ class AiAnalysisIntegrationTest {
             .andExpect(status().isCreated())
             .andReturn().getResponse().getContentAsString();
         return objectMapper.readTree(response).path("uuid").asText();
+    }
+
+    /** Every {@code data/test-cases/*.json} of the report, concatenated. */
+    private static String testCases(String reportUuid) throws IOException {
+        final StringBuilder text = new StringBuilder();
+        try (Stream<Path> files = Files.list(REPORTS_DIR.resolve(reportUuid).resolve("data").resolve("test-cases"))) {
+            for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".json")).sorted().toList()) {
+                text.append(Files.readString(file, StandardCharsets.UTF_8));
+            }
+        }
+        return text.toString();
+    }
+
+    /** The text the stub model answers with; it can only reach a report through a rebuild. */
+    private String stubAnswer() throws IOException {
+        return objectMapper.readTree(OpenCodeStub.ANALYSIS).path("recommendation").asText();
+    }
+
+    /** Entries of {@code history/history-trend.json} of the report. */
+    private JsonNode trend(String reportUuid) throws IOException {
+        return readJson(REPORTS_DIR.resolve(reportUuid).resolve("history").resolve("history-trend.json"));
+    }
+
+    private static void assertSwapLeftNothing(String reportUuid) {
+        assertThat(REPORTS_DIR.resolve(reportUuid + SWAP_TMP_SUFFIX))
+            .as("directory the report was rebuilt in")
+            .doesNotExist();
+        assertThat(REPORTS_DIR.resolve(reportUuid + SWAP_OLD_SUFFIX))
+            .as("directory the previous build was moved to")
+            .doesNotExist();
+    }
+
+    /** Directories {@code prepare-*} left in the cache: each should have moved under its report. */
+    private static List<Path> prepareLeftovers() throws IOException {
+        try (Stream<Path> children = Files.list(CACHE_DIR)) {
+            return children.filter(p -> p.getFileName().toString().startsWith("prepare-")).toList();
+        }
     }
 
     /** The {@code action} the grid renders for the analysis button of one report. */

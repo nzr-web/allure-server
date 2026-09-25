@@ -12,8 +12,8 @@ import ru.iopump.qa.allure.ai.AiJob;
  * @param clusters      failure clusters found in the results
  * @param answered      clusters the model answered for; {@code -1} before the model has run
  * @param withoutAnswer clusters still without an answer; {@code -1} before the model has run
- * @param resultUuid    report created from the analysed results, when a new one was published
- * @param error         failure text, or the reason a new report was deliberately not created
+ * @param resultUuid    report that carries the analysis: the same report, once rebuilt in place
+ * @param error         failure text
  */
 @Schema(description = "State of the AI analysis of a generated report")
 public record AiJobResponse(

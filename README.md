@@ -308,11 +308,13 @@ curl -X POST http://localhost:8080/api/report/{uuid}/ai   # 202 accepted, 200 if
 curl http://localhost:8080/api/report/{uuid}/ai           # status, clusters, answered, resultUuid
 ```
 
-A single-threaded worker sends every cluster to OpenCode and then generates a **new version of the
-same report path** with the answers in it; the pending version stays in history, as after any
-regeneration. Statuses are `none`, `pending`, `queued`, `running`, `done`, `partial` (some clusters
-without an answer - repeating only redoes those) and `error`. With `allure-ai.auto=true` step 2
-starts by itself once step 1 has committed, so a CI pipeline only adds the one JSON field.
+A single-threaded worker sends every cluster to OpenCode and then **regenerates the same report in
+place** with the answers in it: same uuid, URL and row in `/app/reports`, and the night is counted
+once in the *history trend* widget. The new files are built next to the report and swapped in; if
+that fails, the job ends `error` and the report stays as it was. Statuses are `none`, `pending`,
+`queued`, `running`, `done`, `partial` (some clusters without an answer - repeating only redoes
+those, in the same report again) and `error`. With `allure-ai.auto=true` step 2 starts by itself
+once step 1 has committed, so a CI pipeline only adds the one JSON field.
 
 **What you need.**
 
@@ -346,12 +348,8 @@ starts by itself once step 1 has committed, so a CI pipeline only adds the one J
 - The comparison with the previous run needs `executor.json` in the uploaded results (any CI
   publisher writes one). Without it a directory is split into runs by a 60-minute gap between tests,
   which is right for a nightly job but wrong for a directory that accumulated over weeks.
-- Step 2 publishes a second report for the same night, and report history is copied from the
-  pending one, so that night appears twice in the *history trend* widget. This is the price of not
-  blocking the generation request.
-- If a newer report of the same `path` appears while the model is thinking, nothing is published:
-  the job ends `done` with a note, and the analysed results are kept as the previous run for the
-  next generation.
+- Rebuilding a report while a newer generation of the same path trims history may delete it; run
+  generations of one path sequentially.
 
 #### Runtime settings
 

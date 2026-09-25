@@ -21,7 +21,7 @@ public class AiJob {
 
     AiJobStatus status = AiJobStatus.PENDING;
 
-    /** Logical report path, used to regenerate a new version of the same report. */
+    /** Logical report path the report belongs to. */
     String reportPath;
 
     /** Report whose result copy was used as the previous run for the diff; may be null. */
@@ -43,13 +43,13 @@ public class AiJob {
     /** Clusters left without an answer; -1 until the model has run. Stale like {@link #answered}. */
     int withoutAnswer = -1;
 
-    /** Report created from the analysed copy; set on the old job so its GET keeps answering. */
+    /** Report that carries the analysis: the job's own report once it has been rebuilt in place. */
     String resultUuid;
 
     String createdAt;
     String startedAt;
     String finishedAt;
 
-    /** Failure text, or the reason a new report was deliberately not created. */
+    /** Failure text. */
     String error;
 }

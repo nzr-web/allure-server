@@ -11,6 +11,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -23,6 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * {@link Mode#ANSWERS} replies with a well-formed analysis for every cluster; {@link Mode#GARBAGE}
  * replies with prose the response parser cannot read, which is what an unusable model looks like
  * from the outside - including the single re-ask the core makes before giving up.
+ * {@link Mode#PARTIAL} answers like {@link Mode#ANSWERS} except for the cluster of
+ * {@link #PARTIAL_UNANSWERED}, which gets the prose: one cluster answered, one left for a retry.
  * <p>
  * {@link #requirePassword(String, String)} makes it behave like an {@code opencode serve} started
  * with {@code OPENCODE_SERVER_PASSWORD}: every endpoint answers {@code 401} unless the request
@@ -30,17 +34,26 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class OpenCodeStub implements AutoCloseable {
 
-    enum Mode {ANSWERS, GARBAGE}
+    enum Mode {ANSWERS, GARBAGE, PARTIAL}
 
-    private static final String ANALYSIS = "{\"causeClass\":\"product\",\"confidence\":0.8,"
-        + "\"reason\":\"the service replied 500 to a valid request\","
+    /**
+     * The reason is deliberately wordy: the rebuilt report must outgrow the pending one by more than
+     * the kilobyte {@code ReportEntity.size} is counted in, with room to spare.
+     */
+    static final String ANALYSIS = "{\"causeClass\":\"product\",\"confidence\":0.8,"
+        + "\"reason\":\"the service replied 500 to a valid request: its upstream dependency timed out"
+        + " while the request was being processed, which the service log of this build shows\","
         + "\"recommendation\":\"check the service log for this build\",\"bugDraft\":null}";
     private static final String NONSENSE = "I am afraid I cannot answer in JSON right now";
+    /** Scenario name whose cluster {@link Mode#PARTIAL} leaves without an answer. */
+    static final String PARTIAL_UNANSWERED = "beta";
 
     private final HttpServer server;
     private final AtomicInteger sessions = new AtomicInteger();
     private final List<String> messages = new CopyOnWriteArrayList<>();
     private final List<String> authHeaders = new CopyOnWriteArrayList<>();
+    /** Message endpoints of the sessions {@link Mode#PARTIAL} answers with prose. */
+    private final Set<String> refusingSessions = ConcurrentHashMap.newKeySet();
     private volatile Mode mode = Mode.ANSWERS;
     /** The {@code Basic ...} header this stub accepts, or {@code null} while it asks for none. */
     private volatile String expectedAuth;
@@ -153,12 +166,26 @@ final class OpenCodeStub implements AutoCloseable {
         if (path.endsWith("/message")) {
             new ObjectMapper().readTree(body); // the client must send a parseable prompt envelope
             messages.add(new String(body, StandardCharsets.UTF_8));
-            final String text = mode == Mode.ANSWERS ? ANALYSIS : NONSENSE;
+            final String text = answers(path, new String(body, StandardCharsets.UTF_8)) ? ANALYSIS : NONSENSE;
             reply(exchange, "{\"info\":{\"id\":\"msg\",\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\""
                 + text.replace("\"", "\\\"") + "\"}]}");
             return;
         }
         reply(exchange, "true");
+    }
+
+    /**
+     * The re-ask after an unreadable answer goes to the same session and need not repeat the failure
+     * text, so {@link Mode#PARTIAL} remembers the session and keeps refusing in it.
+     */
+    private boolean answers(String messagePath, String prompt) {
+        if (mode != Mode.PARTIAL) {
+            return mode == Mode.ANSWERS;
+        }
+        if (prompt.contains(PARTIAL_UNANSWERED + ":")) {
+            refusingSessions.add(messagePath);
+        }
+        return !refusingSessions.contains(messagePath);
     }
 
     private static void reply(HttpExchange exchange, String json) throws IOException {

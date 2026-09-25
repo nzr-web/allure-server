@@ -65,9 +65,13 @@ public class JpaReportService {
 
     private final AtomicBoolean init = new AtomicBoolean();
 
+    /** Suffixes of the two sibling directories {@link #regenerateInPlace} swaps the report through. */
+    private static final String IN_PLACE_TMP_SUFFIX = ".ai-tmp";
+    private static final String IN_PLACE_OLD_SUFFIX = ".ai-old";
+
     /**
      * Optional AI-analysis add-on. Injected through a setter and not the constructor: the add-on
-     * needs this service back (its worker publishes a new version of the report), and setter
+     * needs this service back (its worker regenerates the report in place), and setter
      * injection resolves that cycle without changing the existing constructor contract.
      */
     private AiAnalysisService aiAnalysisService;
@@ -403,6 +407,104 @@ public class JpaReportService {
         return entity;
     }
 
+    /**
+     * Rebuilds an existing report from new results under the same uuid: URL, level, path, creation
+     * time, build url and redirect stay, only the files and {@link ReportEntity#getSize()} change.
+     * <p>
+     * Used by the AI analysis to put the model answers into the report the user already has open,
+     * instead of publishing the same night as a new version of the path. History is NOT looked up
+     * here: {@code resultDirs} goes to the generator as is, so the caller passes the history the
+     * report was first generated with, or nothing - taking {@code reports/<uuid>/history} would feed
+     * the report its own night a second time.
+     * <p>
+     * The report is built next to the old one and swapped in by two renames; any failure before the
+     * second rename leaves the old report untouched, a failure of the second one moves it back.
+     *
+     * @param uuid       report to rebuild; must exist
+     * @param resultDirs results to build it from; the first one receives {@code executor.json}
+     * @param baseUrl    absolute base url for the links inside the report
+     * @return the same entity with the new size
+     * @throws ResponseStatusException 404 if the report is not found
+     * @throws IOException             if the swap fails; the old report is still in place
+     */
+    public ReportEntity regenerateInPlace(@NonNull UUID uuid,
+                                         @NonNull List<Path> resultDirs,
+                                         String baseUrl
+    ) throws IOException {
+        Preconditions.checkArgument(!resultDirs.isEmpty());
+        resultDirs.forEach(i -> Preconditions.checkArgument(Files.exists(i), "Result '%s' doesn't exist", i));
+        final ReportEntity entity = repository.findOneByUuid(uuid)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Report '" + uuid + "' not found"));
+
+        final Path destination = reportsDir.resolve(uuid.toString());
+        final Path fresh = reportsDir.resolve(uuid + IN_PLACE_TMP_SUFFIX);
+        final Path old = reportsDir.resolve(uuid + IN_PLACE_OLD_SUFFIX);
+
+        // 1. Leftovers of an interrupted swap. A process killed between the two renames leaves the
+        // report only aside: it goes back first, otherwise the clean-up below would delete it
+        if (!Files.exists(destination) && Files.isDirectory(old)) {
+            Files.move(old, destination);
+            log.warn("restored report '{}' from a previous interrupted rebuild", uuid);
+        }
+        deleteQuietly(fresh.toFile());
+        deleteQuietly(old.toFile());
+
+        // 2. Build next to the report the users are looking at
+        final Path resultWithInfo = resultDirs.get(0);
+        addExecutionInfo(
+            resultWithInfo,
+            readExecutorInfo(resultWithInfo),
+            baseUrl + str(reportsDir.resolve(uuid.toString())) + "/index.html",
+            uuid
+        );
+        final String reportUrl = join(baseUrl, cfg.reports().dir(), uuid.toString()) + "/";
+        boolean generated = false;
+        try {
+            reportGenerator.generate(fresh, resultDirs, reportUrl, false);
+            generated = true;
+        } finally {
+            if (!generated) {
+                deleteQuietly(fresh.toFile());
+            }
+        }
+
+        // 3. Old report aside. On Windows an open handle on the directory makes this fail
+        try {
+            Files.move(destination, old);
+        } catch (IOException e) {
+            deleteQuietly(fresh.toFile());
+            throw e;
+        }
+
+        // 4. New report in
+        try {
+            Files.move(fresh, destination);
+        } catch (IOException e) {
+            try {
+                Files.move(old, destination);
+            } catch (IOException rollback) {
+                e.addSuppressed(rollback);
+                log.error("Report '{}' could not be restored from '{}'", destination, old, rollback);
+            }
+            throw e;
+        }
+
+        // 5. Only now the row: a failed swap must not change the size of the report that stayed. Before
+        // the clean-up, which on a full night takes long enough to be interrupted
+        entity.setSize(ReportEntity.sizeKB(destination));
+        repository.saveAndFlush(entity);
+
+        // 6. The new report is served and counted already; a leftover is removed by the next swap or
+        // by the sweep of the AI analysis
+        try {
+            FileUtils.deleteDirectory(old.toFile());
+        } catch (IOException e) {
+            log.warn("Unable to delete the previous copy '{}' of report '{}': {}", old, uuid, e.getMessage());
+        }
+        log.info("Report '{}' regenerated in place according to results '{}'", destination, resultDirs);
+        return entity;
+    }
+
     ///// PRIVATE /////
 
     //region Private
@@ -449,6 +551,21 @@ public class JpaReportService {
         } else {
             // Or nothing
             return Optional.empty();
+        }
+    }
+
+    /** The {@code executor.json} a previous generation left in the results, so a rebuild keeps it. */
+    @Nullable
+    private ExecutorInfo readExecutorInfo(Path resultDir) {
+        final Path file = resultDir.resolve(JSON_FILE_NAME);
+        if (!Files.isRegularFile(file)) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(file.toFile(), ExecutorInfo.class);
+        } catch (IOException e) {
+            log.warn("Unable to read '{}': {}", file, e.getMessage());
+            return null;
         }
     }
 
